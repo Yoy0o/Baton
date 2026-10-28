@@ -1,0 +1,14 @@
+# 依赖与缓存
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# 运行数据（对话、结果、审计）与本地配置
+data/
+.env
+
+# web/dist 是工作台的构建产物。这里选择随代码提交，部署机器不需要 Node；
+# 若改为在流水线中构建，把下面这行取消注释。
+# web/dist/

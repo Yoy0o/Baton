@@ -1,0 +1,55 @@
+# 接入清单：车队追踪地图台
+# 字段说明见 docs/INTEGRATION_RULES.md 第 10 节
+manifest_version: 1
+system: fleet                      # 命名空间：工具全名为 fleet__<tool>
+title: 车队追踪地图台
+description: 司机与车辆实时位置、挂车停留、轨迹；带地图界面。
+owner: gis-team
+base_url: ${FLEET_URL:-http://localhost:8101}
+crs: EPSG:4326
+color: "#2563EB"                  # 系统标识色：工作台里该系统的工具与页签都用它区分
+keywords: [车队, 司机, 位置, 地图, 挂车, 停留, 轨迹, 定位, 分组, 重组]
+auth:
+  mode: none                       # v1 演示；生产环境改为 static_bearer 或后续的 token_exchange
+
+api:
+  openapi: ${FLEET_URL:-http://localhost:8101}/openapi.json
+  expose:                          # 白名单：未列出的接口（如 getTrack）不暴露给 Agent
+    - operation: listRegions
+      tool: list_regions
+      description: 列出可用区域及编码（如 east-china=华东）。其他工具的 region 参数不确定时先调用它。
+
+    - operation: listDrivers
+      tool: search_drivers
+      description: 按区域、状态检索司机档案（含常驻位置），返回 result_id。查实时位置用 fleet__get_driver_positions；查排班名单用 tms__search_shift_drivers。
+      result: {list_path: items, summary: "司机 {total} 人"}
+
+    - operation: getPositions
+      tool: get_driver_positions
+      description: 查询一批司机的最新位置（WGS84），返回带坐标的 result_id，可用于分组或地图展示。
+      params:
+        driver_ids:
+          accepts_result: {as: ids, field: driver_id}   # 可直接传上一步名单的 result_id
+          description: 司机 ID
+      result: {list_path: items, summary: "已获取 {total} 名司机的最新位置"}
+
+    - operation: searchStops
+      tool: search_stops
+      description: 查询最近一段时间内停留时长超过阈值的资产（目前为挂车），含客户、地址、停留分钟数和坐标。用于“停留超时的挂车”类问题。
+      params:
+        asset_type: {fixed: trailer}                     # 固定值，不暴露给模型
+      result: {list_path: items, summary: "停留记录 {total} 条"}
+      examples:
+        - {lookback_h: 24, min_duration_min: 120}
+
+ui_bridge:
+  enabled: true
+  title: 车队地图
+  embed_url: ${FLEET_URL:-http://localhost:8101}/map
+  tools:                           # 允许地图页面注册的界面工具（白名单 + 风险等级）
+    - {tool: show_result_layer, risk: view, title: 叠加结果图层}
+    - {tool: clear_result_layers, risk: view, title: 清除临时图层}
+    - {tool: focus_driver, risk: view, title: 定位司机}
+    - {tool: play_track, risk: view, title: 轨迹回放}
+
+skill: SKILL.md

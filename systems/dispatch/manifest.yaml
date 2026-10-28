@@ -1,0 +1,37 @@
+# 接入清单：调度系统（演示写操作：预览 + 提交成对接口）
+manifest_version: 1
+system: dispatch
+title: 调度系统
+description: 司机组（班组）划分的查询、预览与提交。
+owner: dispatch-team
+base_url: ${DISPATCH_URL:-http://localhost:8103}
+color: "#C026D3"
+keywords: [调度, 司机组, 班组, 分组, 重组, 同步, 写回, 提交]
+
+api:
+  openapi: ${DISPATCH_URL:-http://localhost:8103}/openapi.json
+  expose:
+    - operation: listGroups
+      tool: get_groups
+      description: 查询某区域当前的司机组划分（组号、组名、人数、成员）。只读。
+
+    - operation: previewRegroup
+      tool: preview_regroup
+      risk: read                     # 预览不落库
+      pairs_with: apply_regroup      # 成功后网关签发 confirm_token，供 apply_regroup 使用
+      description: 预览把分组方案写入调度系统会产生哪些变更（不落库），返回变更清单和 confirm_token。groups 直接传 analytics__run_grouping 产出的 result_id。
+      params:
+        groups:
+          accepts_result: {as: group_plan}
+          description: 分组方案
+      hooks:
+        request: systems.dispatch.adapter_hooks:group_plan_to_body   # 平台格式 → 系统格式
+
+    - operation: applyRegroup
+      tool: apply_regroup
+      risk: write                    # 写操作：只接收 confirm_token，网关回放预览参数并要求用户确认
+      description: 把已预览的分组调整提交到调度系统（落库）。只接受 dispatch__preview_regroup 返回的 confirm_token；运行时会先请用户确认。
+      hooks:
+        request: systems.dispatch.adapter_hooks:group_plan_to_body
+
+skill: SKILL.md

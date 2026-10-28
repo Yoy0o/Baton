@@ -1,0 +1,21 @@
+# 接入清单：排班系统（只有后端 API）
+manifest_version: 1
+system: tms
+title: 排班系统
+description: 司机班次与每日排班名单。
+owner: ops-team
+base_url: ${TMS_URL:-http://localhost:8102}
+color: "#7C3AED"
+keywords: [排班, 班次, 早班, 晚班, 名单, 分组, 重组]
+
+api:
+  openapi: ${TMS_URL:-http://localhost:8102}/openapi.json
+  expose:
+    - operation: searchShiftDrivers
+      tool: search_shift_drivers
+      description: 按区域、日期、班次查询排班司机名单（含技能，不含位置）。要分组或上地图时，把返回的 result_id 交给 fleet__get_driver_positions 取位置。
+      result: {list_path: items, summary: "排班司机 {total} 人"}
+      examples:
+        - {region: east-china, date: "2026-10-28", shift: early}
+
+skill: SKILL.md

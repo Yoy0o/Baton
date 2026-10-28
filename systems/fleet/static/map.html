@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>车队追踪地图台（模拟系统）</title>
+<style>
+  :root {
+    --bg: #eef2f5; --panel: #ffffff; --line: #d8dee6; --ink: #1d2733; --muted: #65717e;
+    --brand: #133149; --land: #f3f1ea; --water: #dce9f2; --grid: #dde3e8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  .app { display: grid; grid-template-rows: 44px 1fr 28px; grid-template-columns: 210px 1fr; height: 100%; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: var(--brand); color: #fff; }
+  header .title { font-weight: 600; letter-spacing: .5px; }
+  header .tag { font-size: 11px; opacity: .8; border: 1px solid rgba(255,255,255,.45); border-radius: 3px; padding: 0 5px; }
+  header label { font-size: 12px; opacity: .9; }
+  header select { font: inherit; padding: 1px 4px; border-radius: 3px; border: 0; }
+  header .spacer { flex: 1; }
+  .badge { font-size: 12px; padding: 2px 9px; border-radius: 10px; background: rgba(255,255,255,.16); white-space: nowrap; }
+  .badge.ok { background: #1f7a48; }
+  .badge.warn { background: #8a5a00; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); padding: 8px 12px; overflow: auto; }
+  aside h3 { font-size: 12px; color: var(--muted); margin: 12px 0 6px; font-weight: 600; }
+  .layer { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+  .layer .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .layer .count { color: var(--muted); font-size: 12px; }
+  .layer button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 14px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 1px 0; }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+  .muted { color: var(--muted); font-size: 12px; }
+  main { position: relative; overflow: hidden; background: var(--water); }
+  svg#map { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  svg#map.dragging { cursor: grabbing; }
+  footer { grid-column: 1 / -1; display: flex; gap: 18px; align-items: center; padding: 0 12px; background: var(--panel); border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  .tools { position: absolute; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 4px; }
+  .tools button { width: 30px; height: 30px; border: 1px solid var(--line); background: #fff; border-radius: 4px; cursor: pointer; font-size: 15px; color: var(--ink); }
+  .toast { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: rgba(19,49,73,.94); color: #fff; padding: 6px 12px; border-radius: 4px; font-size: 12px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 80%; }
+  .toast.show { opacity: 1; }
+  @media (max-width: 640px) { .app { grid-template-columns: 1fr; } aside { display: none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="title">车队追踪地图台</span><span class="tag">模拟系统</span>
+    <label>区域
+      <select id="region"><option value="east-china">华东</option><option value="north-china">华北</option></select>
+    </label>
+    <span class="spacer"></span>
+    <span id="agentBadge" class="badge">独立运行</span>
+  </header>
+  <aside>
+    <h3>图层</h3>
+    <div id="layers"></div>
+    <h3>图例</h3>
+    <div id="legend" class="muted">—</div>
+    <h3>选中</h3>
+    <div id="selection" class="muted">点击地图上的司机可选中</div>
+  </aside>
+  <main>
+    <svg id="map" xmlns="http://www.w3.org/2000/svg" aria-label="车队地图"></svg>
+    <div class="tools">
+      <button id="zoomIn" title="放大">+</button>
+      <button id="zoomOut" title="缩小">−</button>
+      <button id="zoomFit" title="当前区域全图">⤢</button>
+    </div>
+    <div id="toast" class="toast"></div>
+  </main>
+  <footer><span id="coords">经纬度 —</span><span id="stat"></span></footer>
+</div>
+
+<script>
+/* =====================================================================
+ * 地图台“已有功能”（模拟）：一个极简 SVG 地图引擎 + 业务操作。
+ * 真实系统里这部分是 Leaflet / MapLibre / Three.js 等现有代码，接入 Agent 时不需要改。
+ * ===================================================================== */
+const mapApp = (() => {
+  const svg = document.getElementById('map');
+  const NS = 'http://www.w3.org/2000/svg';
+  const PALETTE = ['#2a6fdb', '#e8710a', '#1f9d55', '#d63a3a', '#8a4fd6', '#8c5a3c', '#d6489c', '#139bb3', '#a3a31a', '#5f6b78'];
+  const REGIONS = {
+    'east-china': { name: '华东', center: [121.40, 31.22], span: 0.75,
+      areas: [['嘉定', 121.25, 31.38], ['宝山', 121.45, 31.40], ['浦东', 121.62, 31.22], ['闵行', 121.38, 31.11], ['松江', 121.23, 31.03], ['青浦', 121.10, 31.16]] },
+    'north-china': { name: '华北', center: [116.45, 39.92], span: 0.6,
+      areas: [['朝阳', 116.48, 39.92], ['海淀', 116.30, 39.96], ['丰台', 116.29, 39.86], ['通州', 116.66, 39.91]] },
+  };
+  const state = { region: 'east-china', drivers: [], layers: [], selection: new Set(), track: null, cx: 0, cy: 0, scale: 1 };
+  const listeners = [];
+  let layerSeq = 0;
+
+  // 投影：等距圆柱投影 + 纬度余弦修正（区域尺度足够）
+  const K = Math.cos(31 * Math.PI / 180);
+  const px = (lng) => lng * K;
+  const py = (lat) => -lat;
+  const unproject = (x, y) => [x / K, -y];
+
+  function size() { const r = svg.getBoundingClientRect(); return [Math.max(r.width, 1), Math.max(r.height, 1)]; }
+  function viewBox() { const [w, h] = size(); return [state.cx - w / 2 / state.scale, state.cy - h / 2 / state.scale, w / state.scale, h / state.scale]; }
+  function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+  function emitChange() { listeners.forEach(fn => { try { fn(); } catch (e) {} }); }
+
+  function colorMap(values) {
+    const uniq = [...new Set(values.map(v => String(v)))].sort((a, b) => (+a && +b) ? (+a - +b) : a.localeCompare(b, 'zh'));
+    const map = {}; uniq.forEach((v, i) => { map[v] = PALETTE[i % PALETTE.length]; }); return map;
+  }
+
+  function render() {
+    const [x0, y0, w, h] = viewBox();
+    svg.setAttribute('viewBox', `${x0} ${y0} ${w} ${h}`);
+    svg.innerHTML = '';
+    const u = 1 / state.scale; // 1 像素对应的地图单位
+    el('rect', { x: x0, y: y0, width: w, height: h, fill: 'var(--land)' }, svg);
+    // 经纬网
+    const spanDeg = w / K;
+    const step = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1].find(s => spanDeg / s <= 10) || 1;
+    const grid = el('g', { stroke: 'var(--grid)', 'stroke-width': u }, svg);
+    const [lngA, latB] = unproject(x0, y0), [lngB, latA] = unproject(x0 + w, y0 + h);
+    for (let g = Math.ceil(lngA / step) * step; g <= lngB; g += step) el('line', { x1: px(g), y1: y0, x2: px(g), y2: y0 + h }, grid);
+    for (let g = Math.ceil(latA / step) * step; g <= latB; g += step) el('line', { x1: x0, y1: py(g), x2: x0 + w, y2: py(g) }, grid);
+    // 片区注记
+    const labels = el('g', { 'font-size': 12 * u, fill: '#9aa3ad', 'text-anchor': 'middle' }, svg);
+    Object.values(REGIONS).forEach(r => r.areas.forEach(([n, lng, lat]) => { const t = el('text', { x: px(lng), y: py(lat) - 14 * u }, labels); t.textContent = n; }));
+    // 基础图层：司机位置
+    const base = el('g', {}, svg);
+    for (const d of state.drivers) {
+      if (d.region !== state.region) continue;
+      const sel = state.selection.has(d.driver_id);
+      const c = el('circle', { cx: px(d.lng), cy: py(d.lat), r: (sel ? 5.5 : 3.5) * u, fill: sel ? '#133149' : '#9aa5b1', stroke: '#fff', 'stroke-width': u, 'data-id': d.driver_id, style: 'cursor:pointer' }, base);
+      const t = el('title', {}, c); t.textContent = `${d.driver_id} ${d.name}（${d.home_area}）`;
+    }
+    // 临时图层（Agent 推送的结果等）
+    for (const layer of state.layers) {
+      if (!layer.visible) continue;
+      const g = el('g', {}, svg);
+      for (const f of layer.features) {
+        const geom = f.geometry || {}; const p = f.properties || {};
+        if (geom.type !== 'Point') continue;
+        const [lng, lat] = geom.coordinates;
+        const color = layer.colorBy ? (layer.colors[String(p[layer.colorBy])] || '#5f6b78') : '#2a6fdb';
+        const c = el('circle', { cx: px(lng), cy: py(lat), r: 6 * u, fill: color, 'fill-opacity': 0.88, stroke: '#fff', 'stroke-width': 1.4 * u }, g);
+        const t = el('title', {}, c);
+        t.textContent = Object.entries(p).slice(0, 6).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(',') : v}`).join('\n');
+      }
+    }
+    // 轨迹回放
+    if (state.track) {
+      const pts = state.track.points.slice(0, state.track.shown);
+      if (pts.length > 1) el('polyline', { points: pts.map(p => `${px(p.lng)},${py(p.lat)}`).join(' '), fill: 'none', stroke: '#d63a3a', 'stroke-width': 3 * u, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
+      const last = pts[pts.length - 1];
+      if (last) el('circle', { cx: px(last.lng), cy: py(last.lat), r: 7 * u, fill: '#d63a3a', stroke: '#fff', 'stroke-width': 2 * u }, svg);
+    }
+    // 比例尺
+    const kmPerPx = (1 / state.scale) / K * 111.32;
+    const nice = [0.5, 1, 2, 5, 10, 20, 50].find(v => v / kmPerPx >= 60) || 50;
+    const bar = nice / kmPerPx * u;
+    const sb = el('g', {}, svg);
+    el('rect', { x: x0 + 12 * u, y: y0 + h - 24 * u, width: bar, height: 4 * u, fill: '#133149' }, sb);
+    const st = el('text', { x: x0 + 12 * u, y: y0 + h - 30 * u, 'font-size': 11 * u, fill: '#133149' }, sb); st.textContent = `${nice} km`;
+    renderPanel();
+  }
+
+  function renderPanel() {
+    const layersEl = document.getElementById('layers');
+    layersEl.innerHTML = '';
+    const baseCount = state.drivers.filter(d => d.region === state.region).length;
+    layersEl.insertAdjacentHTML('beforeend', `<div class="layer"><span class="swatch" style="background:#9aa5b1"></span><span class="name">司机位置（${REGIONS[state.region].name}）</span><span class="count">${baseCount}</span></div>`);
+    for (const l of state.layers) {
+      const row = document.createElement('div'); row.className = 'layer';
+      row.innerHTML = `<input type="checkbox" ${l.visible ? 'checked' : ''}><span class="name" title="${l.name}">${l.name}</span><span class="count">${l.features.length}</span><button title="移除">×</button>`;
+      row.querySelector('input').onchange = (e) => { l.visible = e.target.checked; render(); };
+      row.querySelector('button').onclick = () => removeLayer(l.id);
+      layersEl.appendChild(row);
+    }
+    const legend = document.getElementById('legend');
+    const top = [...state.layers].reverse().find(l => l.visible && l.colorBy);
+    legend.innerHTML = top
+      ? `<div class="muted">${top.name} · 按 ${top.colorBy}</div>` + Object.entries(top.colors).slice(0, 12).map(([k, c]) => `<div class="legend-item"><span class="swatch" style="background:${c}"></span>${k}</div>`).join('')
+      : '—';
+    const sel = document.getElementById('selection');
+    sel.textContent = state.selection.size ? [...state.selection].join('、') : '点击地图上的司机可选中';
+    document.getElementById('stat').textContent = `临时图层 ${state.layers.length} 个 · 选中 ${state.selection.size} 人`;
+  }
+
+  function setView(cx, cy, scale) { state.cx = cx; state.cy = cy; state.scale = Math.min(Math.max(scale, 50), 200000); render(); emitChange(); }
+
+  // 页面被隐藏时（例如在工作台的后台页签里被 Agent 调用）量不到尺寸，等可见后再缩放
+  let pendingFit = null;
+  function visible() { const r = svg.getBoundingClientRect(); return r.width > 2 && r.height > 2; }
+
+  function fitBounds(b, padPx = 48) {
+    if (!visible()) { pendingFit = [b, padPx]; return; }
+    pendingFit = null;
+    const [w, h] = size();
+    const bw = Math.max((px(b[2]) - px(b[0])), 0.004), bh = Math.max((py(b[1]) - py(b[3])), 0.004);
+    const scale = Math.min((w - padPx * 2) / bw, (h - padPx * 2) / bh);
+    setView((px(b[0]) + px(b[2])) / 2, (py(b[1]) + py(b[3])) / 2, scale);
+  }
+
+  function regionOf(lng, lat) {
+    let best = null, bestD = Infinity;
+    for (const [code, r] of Object.entries(REGIONS)) {
+      const d = (r.center[0] - lng) ** 2 + (r.center[1] - lat) ** 2;
+      if (d < bestD) { bestD = d; best = code; }
+    }
+    return best;
+  }
+
+  function setRegion(code, fit = true) {
+    state.region = code;
+    document.getElementById('region').value = code;
+    if (fit) { const r = REGIONS[code]; fitBounds([r.center[0] - r.span / 2, r.center[1] - r.span / 2.6, r.center[0] + r.span / 2, r.center[1] + r.span / 2.6]); }
+    else { render(); emitChange(); }
+  }
+
+  function boundsOf(features) {
+    let b = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const f of features) { if (!f.geometry || f.geometry.type !== 'Point') continue; const [x, y] = f.geometry.coordinates; b = [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)]; }
+    return isFinite(b[0]) ? b : null;
+  }
+
+  function addTempLayer(geojson, opts = {}) {
+    const features = (geojson && geojson.features) || [];
+    const colorBy = opts.colorBy || null;
+    const colors = colorBy ? colorMap(features.map(f => (f.properties || {})[colorBy])) : {};
+    const layer = { id: 'L' + (++layerSeq), name: opts.name || ('结果图层 ' + layerSeq), features, colorBy, colors, visible: true, bounds: boundsOf(features) };
+    state.layers = state.layers.filter(l => l.name !== layer.name); // 同名图层替换
+    state.layers.push(layer);
+    if (layer.bounds) { const c = regionOf((layer.bounds[0] + layer.bounds[2]) / 2, (layer.bounds[1] + layer.bounds[3]) / 2); if (c !== state.region) setRegion(c, false); }
+    render(); emitChange();
+    return { id: layer.id, name: layer.name, count: features.length, bounds: layer.bounds, categories: Object.keys(colors).length };
+  }
+
+  function removeLayer(id) { state.layers = state.layers.filter(l => l.id !== id); render(); emitChange(); }
+  function clearTempLayers() { const n = state.layers.length; state.layers = []; state.track = null; render(); emitChange(); return n; }
+
+  function focusDriver(id) {
+    const d = state.drivers.find(x => x.driver_id === id);
+    if (!d) return null;
+    if (d.region !== state.region) state.region = d.region, document.getElementById('region').value = d.region;
+    state.selection = new Set([id]);
+    setView(px(d.lng), py(d.lat), Math.max(state.scale, 6000));
+    toast(`已定位：${d.driver_id} ${d.name}`);
+    return d;
+  }
+
+  async function playTrack(id, date) {
+    const resp = await fetch(`/api/tracks/${encodeURIComponent(id)}?date=${encodeURIComponent(date)}`); // 调用本系统自己的接口
+    if (!resp.ok) { const b = await resp.json().catch(() => ({})); const e = new Error(b.detail || `查询轨迹失败 ${resp.status}`); e.code = 'TRACK_NOT_FOUND'; throw e; }
+    const data = await resp.json();
+    const pts = data.points;
+    const d = state.drivers.find(x => x.driver_id === id);
+    if (d && d.region !== state.region) state.region = d.region, document.getElementById('region').value = d.region;
+    state.track = { id, points: pts, shown: 1 };
+    fitBounds(boundsOf(pts.map(p => ({ geometry: { type: 'Point', coordinates: [p.lng, p.lat] } }))), 60);
+    let dist = 0;
+    for (let i = 1; i < pts.length; i++) { const dx = (pts[i].lng - pts[i - 1].lng) * 111.32 * K, dy = (pts[i].lat - pts[i - 1].lat) * 110.57; dist += Math.hypot(dx, dy); }
+    const started = performance.now(), dur = 5000;
+    const step = (now) => {
+      if (!state.track || state.track.id !== id) return;
+      state.track.shown = Math.max(1, Math.round(pts.length * Math.min(1, (now - started) / dur)));
+      render();
+      if (state.track.shown < pts.length) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    toast(`回放 ${id} ${data.date} 的轨迹`);
+    return { date: data.date, points: pts.length, distance_km: dist.toFixed(1), start: pts[0].ts.slice(11, 16), end: pts[pts.length - 1].ts.slice(11, 16), name: d ? d.name : '' };
+  }
+
+  function getBounds() { const [x0, y0, w, h] = viewBox(); const [a, b] = unproject(x0, y0 + h), [c, d] = unproject(x0 + w, y0); return [a, b, c, d]; }
+  function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2600); }
+
+  // 交互：拖拽平移、滚轮缩放、点击选中
+  let drag = null;
+  svg.addEventListener('pointerdown', (e) => {
+    const id = e.target && e.target.getAttribute ? e.target.getAttribute('data-id') : null; // 捕获指针前记下点中的司机
+    drag = { x: e.clientX, y: e.clientY, cx: state.cx, cy: state.cy, moved: false, id };
+    svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener('pointermove', (e) => {
+    const r = svg.getBoundingClientRect(); const [x0, y0] = viewBox();
+    const [lng, lat] = unproject(x0 + (e.clientX - r.left) / state.scale, y0 + (e.clientY - r.top) / state.scale);
+    document.getElementById('coords').textContent = `经纬度 ${lng.toFixed(5)}, ${lat.toFixed(5)}`;
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) { drag.moved = true; svg.classList.add('dragging'); }
+    if (drag.moved) { state.cx = drag.cx - dx / state.scale; state.cy = drag.cy - dy / state.scale; render(); }
+  });
+  svg.addEventListener('pointerup', (e) => {
+    svg.classList.remove('dragging');
+    if (drag && !drag.moved && drag.id) {
+      const id = drag.id;
+      if (state.selection.has(id)) state.selection.delete(id); else state.selection.add(id);
+      render();
+    }
+    if (drag) emitChange();
+    drag = null;
+  });
+  svg.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const r = svg.getBoundingClientRect(); const [x0, y0] = viewBox();
+    const mx = x0 + (e.clientX - r.left) / state.scale, my = y0 + (e.clientY - r.top) / state.scale;
+    const f = e.deltaY < 0 ? 1.25 : 0.8, s = state.scale * f;
+    setView(mx - (mx - state.cx) / f, my - (my - state.cy) / f, s);
+  }, { passive: false });
+  document.getElementById('zoomIn').onclick = () => setView(state.cx, state.cy, state.scale * 1.4);
+  document.getElementById('zoomOut').onclick = () => setView(state.cx, state.cy, state.scale / 1.4);
+  document.getElementById('zoomFit').onclick = () => setRegion(state.region);
+  document.getElementById('region').onchange = (e) => setRegion(e.target.value);
+  window.addEventListener('resize', () => { if (pendingFit && visible()) fitBounds(...pendingFit); else render(); });
+
+  async function init() {
+    const lists = await Promise.all(['east-china', 'north-china'].map(r => fetch(`/api/drivers?region=${r}`).then(x => x.json())));
+    state.drivers = lists.flatMap(l => l.items);
+    setRegion('east-china');
+  }
+  init();
+
+  return {
+    get region() { return state.region; },
+    addTempLayer, removeLayer, clearTempLayers, fitBounds, focusDriver, playTrack, getBounds, toast,
+    getSelection: () => [...state.selection],
+    listLayers: () => state.layers.map(l => ({ id: l.id, name: l.name, count: l.features.length, colorBy: l.colorBy })),
+    onViewChange: (fn) => listeners.push(fn),
+  };
+})();
+</script>
+
+<!-- =====================================================================
+  接入 Agent：以下是为接入新增的全部代码。系统原有代码与后端接口均未改动。
+  - 只有带 ?agent=<Agent 地址> 打开（如被工作台内嵌）时才加载桥接 SDK；
+  - 注册的工具名必须在 systems/fleet/manifest.yaml 的 ui_bridge.tools 中声明；
+  - 每个工具只调用上面 mapApp 的已有方法。
+===================================================================== -->
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const agent = params.get('agent');
+  const badge = document.getElementById('agentBadge');
+  if (!agent) return;
+  const setBadge = (cls, text) => { badge.className = 'badge ' + cls; badge.textContent = text; };
+  const s = document.createElement('script');
+  s.src = agent.replace(/\/+$/, '') + '/sdk/agent-bridge.js';
+  s.onload = setup;
+  s.onerror = () => setBadge('warn', 'Agent SDK 加载失败');
+  document.head.appendChild(s);
+
+  function setup() {
+    const bridge = AgentBridge.createAgentBridge({ system: 'fleet' });
+    bridge.onStatus((st, detail) => {
+      if (st === 'connected') setBadge('ok', `已接入 Agent（${(detail.accepted || []).length} 个界面工具）`);
+      else if (st === 'connecting') setBadge('', '连接 Agent…');
+      else if (st === 'rejected') setBadge('warn', '接入被拒绝');
+      else if (st === 'disconnected') setBadge('warn', 'Agent 已断开，重连中');
+    });
+
+    bridge.registerTool({
+      name: 'show_result_layer',
+      title: '叠加结果图层',
+      description: '把结果仓库中的一个带坐标的结果（result_id）叠加到车队地图上作为临时图层，可按属性分类着色，并自动缩放到结果范围。只改界面，不改业务数据。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          result_id: { type: 'string', description: '要展示的结果 ID' },
+          color_by: { type: 'string', description: '按该属性分类着色，如 group、customer，可选' },
+          layer_name: { type: 'string', description: '图层名称，可选；默认“Agent 结果”，同名图层会被替换' },
+          fit_bounds: { type: 'boolean', description: '是否缩放到结果范围，默认 true' },
+        },
+        required: ['result_id'],
+      },
+      async execute({ result_id, color_by, layer_name, fit_bounds = true }) {
+        const fc = await bridge.fetchResult(result_id, 'geojson');
+        const layer = mapApp.addTempLayer(fc, { name: layer_name || 'Agent 结果', colorBy: color_by });
+        if (fit_bounds && layer.bounds) mapApp.fitBounds(layer.bounds);
+        mapApp.toast(`Agent 已叠加 ${result_id}（${layer.count} 个点）`);
+        return { ok: true, summary: `已在车队地图叠加图层“${layer.name}”（${result_id}），${layer.count} 个点` + (color_by ? `，按 ${color_by} 分 ${layer.categories} 类着色` : '') };
+      },
+    });
+
+    bridge.registerTool({
+      name: 'clear_result_layers',
+      title: '清除临时图层',
+      description: '清除车队地图上 Agent 叠加的全部临时图层和轨迹，恢复原始视图。只改界面。',
+      inputSchema: { type: 'object', properties: {} },
+      execute() { return `已清除 ${mapApp.clearTempLayers()} 个临时图层`; },
+    });
+
+    bridge.registerTool({
+      name: 'focus_driver',
+      title: '定位司机',
+      description: '在车队地图上定位并选中某个司机（地图台自带功能）。只改界面。',
+      inputSchema: { type: 'object', properties: { driver_id: { type: 'string', description: '司机 ID，如 D0012' } }, required: ['driver_id'] },
+      execute({ driver_id }) {
+        const d = mapApp.focusDriver(driver_id);
+        if (!d) return { ok: false, error: { code: 'NOT_FOUND', message: `地图上没有司机 ${driver_id}`, fix_hint: '确认司机 ID 是否正确' } };
+        return `已在车队地图定位司机 ${d.driver_id}（${d.name}，${d.home_area}）`;
+      },
+    });
+
+    bridge.registerTool({
+      name: 'play_track',
+      title: '轨迹回放',
+      description: '在车队地图上回放某个司机某天的行驶轨迹（地图台自带功能，轨迹数据由地图台自己查询）。只改界面。',
+      inputSchema: {
+        type: 'object',
+        properties: { driver_id: { type: 'string', description: '司机 ID，如 D0012' }, date: { type: 'string', description: '日期 YYYY-MM-DD' } },
+        required: ['driver_id', 'date'],
+      },
+      async execute({ driver_id, date }) {
+        const r = await mapApp.playTrack(driver_id, date);
+        return `正在车队地图回放 ${driver_id}${r.name ? '（' + r.name + '）' : ''} ${r.date} 的轨迹：${r.points} 个点，约 ${r.distance_km} km，${r.start}–${r.end}`;
+      },
+    });
+
+    // 界面状态：每轮对话附带给 Agent，用来理解“当前视图里”“我选中的这几个人”
+    bridge.provideViewState(() => ({
+      region: mapApp.region,
+      map_bbox: mapApp.getBounds().map(v => +v.toFixed(4)),
+      selected_driver_ids: mapApp.getSelection().slice(0, 50),
+      layers: mapApp.listLayers().map(l => l.name),
+    }));
+    mapApp.onViewChange(() => bridge.notifyViewChanged());
+  }
+})();
+</script>
+</body>
+</html>
