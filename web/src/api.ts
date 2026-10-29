@@ -35,7 +35,7 @@ export type Bridges = Record<string, BridgeConn[]>;
 export interface AppConfig {
   app: { name: string; tagline: string; version: string };
   version: string;
-  mode: 'demo' | 'llm';
+  mode: 'rule' | 'llm';
   planner: string;
   agent_url: string;
   systems: SystemInfo[];

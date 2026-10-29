@@ -31,7 +31,7 @@ def _run_until_finished(wb, approve: bool | None = True, timeout: float = 20) ->
 def test_config_and_tools(settings, transport):
     with _client(settings, transport) as c:
         cfg = c.get("/api/config").json()
-        assert cfg["mode"] == "demo" and cfg["load_errors"] == {}
+        assert cfg["mode"] == "rule" and cfg["load_errors"] == {}
         assert cfg["app"]["name"] == "Baton"
         fleet = next(s for s in cfg["systems"] if s["system"] == "fleet")
         assert fleet["embed_url"].endswith("/map") and fleet["color"] == "#2563EB"

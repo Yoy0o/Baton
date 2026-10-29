@@ -5,7 +5,7 @@ import re
 
 from fastapi import FastAPI, HTTPException, Query
 
-from systems import _demo_data as demo
+from systems import _sample_data as sample
 
 app = FastAPI(title="排班系统（模拟）", version="1.0.0", description="司机班次与排班名单。")
 
@@ -36,7 +36,7 @@ def search_shift_drivers(
             "shift_end": f"{date}T{info['end']}:00+08:00",
             "skills": d["skills"],
         }
-        for d in demo.DRIVERS
+        for d in sample.DRIVERS
         if d["region"] == region and d["shift"] == shift
     ]
     return {"region": region, "date": date, "shift": shift, "total": len(items), "items": items}

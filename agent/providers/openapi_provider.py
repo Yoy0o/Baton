@@ -352,9 +352,9 @@ class OpenAPIProvider:
                 op.method, url, params=query or None, json=body, headers=headers, timeout=self.http_timeout_s
             )
         except httpx.TimeoutException:
-            raise ToolError("SYSTEM_TIMEOUT", f"{self.m.title} 响应超时", "稍后重试，或缩小查询范围", retryable=True)
+            raise ToolError("SYSTEM_TIMEOUT", f"{self.m.title} 响应超时", "稍后重试，或缩小查询范围", retryable=True) from None
         except httpx.HTTPError as e:
-            raise ToolError("SYSTEM_UNREACHABLE", f"无法连接 {self.m.title}：{e}", "确认该系统已启动", retryable=True)
+            raise ToolError("SYSTEM_UNREACHABLE", f"无法连接 {self.m.title}：{e}", "确认该系统已启动", retryable=True) from e
 
         if resp.status_code >= 400:
             raise self._http_error(resp)

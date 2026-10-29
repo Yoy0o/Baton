@@ -17,13 +17,13 @@ def write(tmp_path, body: str):
 
 BASE = """
 manifest_version: 1
-system: demo
-title: 演示系统
+system: sample
+title: 样例系统
 base_url: http://localhost:9999
 """
 
 
-def test_demo_manifests_load(settings):
+def test_builtin_manifests_load(settings):
     manifests = load_manifests(settings.manifests_glob)
     assert {m.system for m in manifests} == {"fleet", "tms", "dispatch"}
     for m in manifests:
@@ -33,8 +33,8 @@ def test_demo_manifests_load(settings):
 
 
 def test_env_expansion(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEMO_URL", "http://example.test:1234")
-    m = load_manifest(write(tmp_path, BASE.replace("http://localhost:9999", "${DEMO_URL:-http://x}")))
+    monkeypatch.setenv("SAMPLE_URL", "http://example.test:1234")
+    m = load_manifest(write(tmp_path, BASE.replace("http://localhost:9999", "${SAMPLE_URL:-http://x}")))
     assert m.base_url == "http://example.test:1234"
 
 

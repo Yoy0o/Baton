@@ -1,8 +1,8 @@
-"""演示模式：未配置模型时，用规则脚本代替模型做“规划”，按步骤发出工具调用。
+"""规则模式：未配置模型时，用规则脚本代替模型做“规划”，按步骤发出工具调用。
 
 它和真实模型走完全相同的链路（运行时 → 网关 → 适配器 → 系统 / 界面 → 确认卡片 → 审计），
-用来在没有模型密钥时验证架构与接入规则。它只认识几类演示指令，见 HELP_TEXT。
-最终答复按字逐段推送，模拟流式输出；并附带追问建议（suggestions，演示模式专有）。
+用来在没有模型密钥时验证架构与接入规则，也是端到端场景测试的驱动器。它只认识几类内置指令，见 HELP_TEXT。
+最终答复按字逐段推送，模拟流式输出；并附带追问建议（suggestions，规则模式专有）。
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from .config import Settings
@@ -21,7 +21,7 @@ STOPS_PROMPT = "在地图上显示过去 24 小时停留超过 2 小时的挂车
 TRACK_PROMPT = "回放司机 D0012 今天的轨迹"
 ADJUST_PROMPT = "把 D0012 换到第 3 组，然后同步到调度系统"
 
-HELP_TEXT = f"""当前是**演示模式**（未配置模型），只识别以下几类指令。接入模型后可以自由提问。
+HELP_TEXT = f"""当前是**规则模式**（未配置模型），只识别以下几类指令。接入模型后可以自由提问。
 
 - 司机组重组：{REGROUP_PROMPT}
 - 微调方案：{ADJUST_PROMPT}
@@ -36,14 +36,6 @@ def _num(s: str) -> float:
     return float(s) if re.match(r"^[0-9.]+$", s) else float(_CN.get(s, 0))
 
 
-def _today(tzname: str) -> date:
-    try:
-        from zoneinfo import ZoneInfo
-
-        tz: Any = ZoneInfo(tzname)
-    except Exception:  # Windows 未装 tzdata 时退回东八区
-        tz = timezone(timedelta(hours=8))
-    return datetime.now(tz).date()
 
 
 def parse_region(text: str) -> str:
@@ -203,12 +195,12 @@ def _final(text: str, suggestions: list[str] | None = None) -> dict[str, Any]:
     return msg
 
 
-class DemoPlanner:
-    label = "演示模式（规则脚本）"
+class RulePlanner:
+    label = "规则模式（未配置模型）"
 
     def __init__(self, settings: Settings):
-        self.tz = settings.timezone
-        self.delay = settings.demo_stream_delay_s
+        self.settings = settings  # 时区取 settings.tzinfo，与模型模式的系统提示词一致
+        self.delay = settings.rule_stream_delay_s
 
     async def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], on_delta=None) -> dict[str, Any]:
         names = {t["function"]["name"] for t in tools}
@@ -217,6 +209,9 @@ class DemoPlanner:
         if on_delta is not None and msg.get("content") and not msg.get("tool_calls"):
             await self._stream(msg["content"], on_delta)
         return msg
+
+    def _today(self) -> date:
+        return datetime.now(self.settings.tzinfo).date()
 
     async def _stream(self, text: str, on_delta) -> None:
         """按 1–4 个字一段推送，模拟模型逐字输出。"""
@@ -295,7 +290,7 @@ class DemoPlanner:
     def _plan_regroup(self, c: _Convo, names: set[str]) -> dict[str, Any]:
         text = c.text
         region, shift = parse_region(text), parse_shift(text)
-        day = parse_date(text, _today(self.tz))
+        day = parse_date(text, self._today())
         k, cap = parse_groups(text) or 5, parse_max_size(text)
         wants_sync = bool(re.search(r"同步|写回|提交|调度系统", text))
 
@@ -410,7 +405,7 @@ class DemoPlanner:
     def _plan_track(self, c: _Convo, names: set[str]) -> dict[str, Any]:
         m = re.search(r"D\d{4}", c.text)
         driver = m.group(0) if m else "D0012"
-        day = parse_date(c.text, _today(self.tz))
+        day = parse_date(c.text, self._today())
         if "fleet__play_track" not in names:
             return _final("车队地图未打开。轨迹回放是车队地图台自带的界面功能，请先在右侧工作区打开“车队地图”，状态显示已接入后再试。")
         r = c.done("fleet__play_track")

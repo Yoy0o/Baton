@@ -24,7 +24,7 @@ class FakePage:
     def __init__(self, platform: Platform, client_id: str = CLIENT):
         self.calls: list[tuple[str, dict]] = []
         self.conn = BridgeConn(
-            id="page1", system="fleet", client_id=client_id, user="demo", page="/map", ws=self,
+            id="page1", system="fleet", client_id=client_id, user="local", page="/map", ws=self,
             tools={k: {"title": k, "description": f"地图界面工具 {k}", "inputSchema": v} for k, v in self.TOOLS.items()},
         )
         platform.hub.conns[self.conn.id] = self.conn
@@ -62,7 +62,7 @@ class Driver:
         self.confirm = confirm
         await self.p.gateway.ensure_loaded(force=True)
         if self.conv is None:
-            self.conv = self.p.conversations.create("demo", text[:20])
+            self.conv = self.p.conversations.create("local", text[:20])
         sess = self.p.runtime.session(self.conv)
         start = len(self.events)
         assert self.p.runtime.start(sess, text, self.client_id)

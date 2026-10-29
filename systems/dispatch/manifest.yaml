@@ -1,4 +1,4 @@
-# 接入清单：调度系统（演示写操作：预览 + 提交成对接口）
+# 接入清单：调度系统（写操作：预览 + 提交成对接口）
 manifest_version: 1
 system: dispatch
 title: 调度系统

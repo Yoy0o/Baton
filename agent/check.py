@@ -69,6 +69,9 @@ async def run(pattern: str, verbose: bool) -> int:
 
 
 def main() -> None:
+    # Windows 中文控制台默认 GBK，打印 ✓ / ✗ 会抛 UnicodeEncodeError；统一按 UTF-8 输出，编不了的字符替换掉
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     load_dotenv()
     parser = argparse.ArgumentParser(description="检查系统接入清单")
     parser.add_argument("pattern", nargs="?", default=Settings().manifests_glob, help="清单路径或 glob")

@@ -23,16 +23,16 @@ async def _platform(settings, transport) -> Platform:
 def test_catalog_generated_from_openapi(settings, transport):
     async def body():
         p = await _platform(settings, transport)
-        names = {s.name for s in p.gateway.catalog("s1", "demo")}
+        names = {s.name for s in p.gateway.catalog("s1", "local")}
         assert {
             "fleet__search_drivers", "fleet__get_driver_positions", "fleet__search_stops", "fleet__list_regions",
             "tms__search_shift_drivers", "dispatch__get_groups", "dispatch__preview_regroup", "dispatch__apply_regroup",
             "analytics__run_grouping", "canvas__show", "results__preview", "results__stats",
         } <= names
         assert "fleet__get_track" not in names  # 未在白名单中的接口不暴露
-        stops = p.gateway.find("fleet__search_stops", "s1", "demo")
+        stops = p.gateway.find("fleet__search_stops", "s1", "local")
         assert "asset_type" not in stops.input_schema["properties"]  # fixed 参数不暴露给模型
-        apply = p.gateway.find("dispatch__apply_regroup", "s1", "demo")
+        apply = p.gateway.find("dispatch__apply_regroup", "s1", "local")
         assert list(apply.input_schema["properties"]) == ["confirm_token"]
         assert apply.needs_confirmation
         await p.http.aclose()
@@ -43,7 +43,7 @@ def test_catalog_generated_from_openapi(settings, transport):
 def test_result_refs_and_grouping(settings, transport):
     async def body():
         p = await _platform(settings, transport)
-        ctx = CallContext(user="demo", session_id="s1")
+        ctx = CallContext(user="local", session_id="s1")
         r1 = await p.gateway.call(ctx, "tms__search_shift_drivers", {"region": "east-china", "date": "2026-10-28", "shift": "early"})
         assert r1["ok"] and r1["total"] == 38 and r1["result_type"] == "table"
         assert len(r1["preview"]) == 5
@@ -63,7 +63,7 @@ def test_result_refs_and_grouping(settings, transport):
 def test_errors_are_correctable(settings, transport):
     async def body():
         p = await _platform(settings, transport)
-        ctx = CallContext(user="demo", session_id="s1")
+        ctx = CallContext(user="local", session_id="s1")
         bad = await p.gateway.call(ctx, "fleet__get_driver_positions", {"driver_ids": 123})
         assert bad["error_code"] == "INVALID_ARGS" and "fix_hint" in bad
         unknown = await p.gateway.call(ctx, "fleet__search_driver", {})
@@ -96,7 +96,7 @@ def test_write_requires_preview_and_confirmation(settings, transport, approve):
             asked.append(entry)
             return approve
 
-        ctx = CallContext(user="demo", session_id="s1", confirm=confirm)
+        ctx = CallContext(user="local", session_id="s1", confirm=confirm)
         plan = await _plan(p, ctx)
         before = (await p.http.get("http://localhost:8103/api/groups?region=east-china")).json()["version"]
 
@@ -105,7 +105,7 @@ def test_write_requires_preview_and_confirmation(settings, transport, approve):
 
         pv = await p.gateway.call(ctx, "dispatch__preview_regroup", {"region": "east-china", "groups": plan})
         assert pv["ok"] and pv["confirm_token"].startswith("cf_") and pv["changes"]
-        other = CallContext(user="demo", session_id="s2", confirm=confirm)
+        other = CallContext(user="local", session_id="s2", confirm=confirm)
         stolen = await p.gateway.call(other, "dispatch__apply_regroup", {"confirm_token": pv["confirm_token"]})
         assert stolen["error_code"] == "CONFIRM_TOKEN_FORBIDDEN"
 
@@ -129,7 +129,7 @@ def test_write_requires_preview_and_confirmation(settings, transport, approve):
 def test_write_without_ui_channel_is_refused(settings, transport):
     async def body():
         p = await _platform(settings, transport)
-        ctx = CallContext(user="demo", session_id="s1")  # 无确认通道（如 MCP 调试端点）
+        ctx = CallContext(user="local", session_id="s1")  # 无确认通道（如 MCP 调试端点）
         plan = await _plan(p, ctx)
         pv = await p.gateway.call(ctx, "dispatch__preview_regroup", {"region": "east-china", "groups": plan})
         ap = await p.gateway.call(ctx, "dispatch__apply_regroup", {"confirm_token": pv["confirm_token"]})

@@ -192,7 +192,7 @@ class BridgeHub:
             await conn.ws.send_json({"type": "call", "call_id": call_id, "tool": local, "args": args})
             result = await asyncio.wait_for(fut, timeout=timeout_s)
         except asyncio.TimeoutError:
-            raise ToolError("UI_TIMEOUT", f"{title} 界面 {timeout_s:.0f} 秒内未完成 {local}", "稍后重试；耗时操作应改为后台任务（R5.3）", True)
+            raise ToolError("UI_TIMEOUT", f"{title} 界面 {timeout_s:.0f} 秒内未完成 {local}", "稍后重试；耗时操作应改为后台任务（R5.3）", True) from None
         finally:
             conn.pending.pop(call_id, None)
         if not isinstance(result, dict):

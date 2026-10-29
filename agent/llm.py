@@ -3,7 +3,7 @@
 - 默认流式输出（stream=true，SSE），边生成边把文字推给工作台；工具调用参数按块拼接。
 - 接口不支持流式时自动退回一次性返回，并在本进程内记住。
 - 支持 reasoning_content（如 DeepSeek、通义的思考模式）：只展示，不回传给模型。
-直接走 HTTP，不依赖具体 SDK 版本。未配置模型时使用 demo_planner.DemoPlanner（演示模式）。
+直接走 HTTP，不依赖具体 SDK 版本。未配置模型时使用 rule_planner.RulePlanner（规则模式）。
 """
 from __future__ import annotations
 
@@ -199,6 +199,6 @@ def _parse_message(msg: dict[str, Any]) -> dict[str, Any]:
 def make_llm(settings: Settings, http: httpx.AsyncClient) -> LLM:
     if settings.llm_enabled:
         return OpenAICompatLLM(settings, http)
-    from .demo_planner import DemoPlanner
+    from .rule_planner import RulePlanner
 
-    return DemoPlanner(settings)
+    return RulePlanner(settings)

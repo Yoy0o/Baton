@@ -66,11 +66,11 @@ export function SystemsButton() {
 export function ModeTag() {
   const { config } = useWorkbench();
   if (!config) return null;
-  if (config.mode === 'demo') {
+  if (config.mode === 'rule') {
     return (
-      <Tooltip title="未配置模型：用规则脚本代替模型规划，只识别演示指令，调用链路与真实模型相同。在 .env 中配置 LLM_BASE_URL、LLM_MODEL 后重启即可接入模型。">
+      <Tooltip title="未配置模型：用规则脚本代替模型规划，只识别内置指令，调用链路与真实模型相同。在 .env 中配置 LLM_BASE_URL、LLM_MODEL 后重启即可接入模型。">
         <Tag icon={<ExperimentOutlined />} className="bt-mode-tag">
-          演示模式
+          规则模式
         </Tag>
       </Tooltip>
     );

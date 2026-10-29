@@ -11,7 +11,7 @@ export interface TaskPreset {
   systems: string[];
 }
 
-/** 演示用的常用任务；接入真实模型后同样可用（就是普通的自然语言指令）。 */
+/** 内置的常用任务（规则模式能识别的指令）；接入真实模型后同样可用（就是普通的自然语言指令）。 */
 export const TASK_PRESETS: TaskPreset[] = [
   {
     key: 'regroup',

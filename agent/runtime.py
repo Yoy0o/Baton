@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 from .config import Settings
@@ -349,7 +349,7 @@ class AgentRuntime:
             approved = await asyncio.wait_for(fut, timeout=self.s.confirm_timeout_s)
         except asyncio.TimeoutError:
             await emit({"type": "confirm_resolved", "confirm_id": entry.token, "approved": False, "reason": "timeout"})
-            raise ToolError("CONFIRM_TIMEOUT", "用户未在规定时间内确认，变更未提交", "告诉用户变更未提交，可稍后重新发起")
+            raise ToolError("CONFIRM_TIMEOUT", "用户未在规定时间内确认，变更未提交", "告诉用户变更未提交，可稍后重新发起") from None
         except asyncio.CancelledError:
             reason = "interrupted" if self.closing else "stopped"
             await emit({"type": "confirm_resolved", "confirm_id": entry.token, "approved": False, "reason": reason})
@@ -371,7 +371,7 @@ class AgentRuntime:
         return hist[starts[-1]:] if starts else hist[-_HISTORY_LIMIT:]
 
     def _system_prompt(self, sess: Session, specs: list[ToolSpec]) -> str:
-        now = datetime.now(timezone(timedelta(hours=8)))
+        now = datetime.now(self.s.tzinfo)  # 与规则模式同一个时区来源（AGENT_TZ）
         ui_systems = sorted({s.system for s in specs if s.kind == "ui"})
         ui = "、".join(
             (self.gw.manifests[s].ui_bridge.title or self.gw.manifests[s].title) + f"（{s}）" for s in ui_systems
@@ -387,7 +387,7 @@ class AgentRuntime:
         )
         return SYSTEM_PROMPT.format(
             app_name=self.s.app_name,
-            now=now.strftime("%Y-%m-%d %H:%M（%A，东八区）"),
+            now=f"{now:%Y-%m-%d %H:%M}（{now:%A}，{self.s.timezone}，UTC{now:%z}）",
             ui=ui,
             view_state=json.dumps(views, ensure_ascii=False) if views else "无",
             results=json.dumps(brief, ensure_ascii=False) if brief else "无",

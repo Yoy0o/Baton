@@ -5,9 +5,9 @@ import pytest
 
 from agent.analytics import capacitated_kmeans
 from agent.contracts import ToolError
-from systems import _demo_data as demo
+from systems import _sample_data as sample
 
-POINTS = [(d["driver_id"], d["lng"], d["lat"]) for d in demo.DRIVERS if d["region"] == "east-china" and d["shift"] == "early"]
+POINTS = [(d["driver_id"], d["lng"], d["lat"]) for d in sample.DRIVERS if d["region"] == "east-china" and d["shift"] == "early"]
 
 
 def test_capacity_and_determinism():

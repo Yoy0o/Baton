@@ -10,7 +10,7 @@ crs: EPSG:4326
 color: "#2563EB"                  # 系统标识色：工作台里该系统的工具与页签都用它区分
 keywords: [车队, 司机, 位置, 地图, 挂车, 停留, 轨迹, 定位, 分组, 重组]
 auth:
-  mode: none                       # v1 演示；生产环境改为 static_bearer 或后续的 token_exchange
+  mode: none                       # 仅限本地模拟系统；生产环境改为 static_bearer 或后续的 token_exchange
 
 api:
   openapi: ${FLEET_URL:-http://localhost:8101}/openapi.json

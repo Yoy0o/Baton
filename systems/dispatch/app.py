@@ -1,6 +1,6 @@
 """模拟系统：调度系统（司机组管理）。
 
-演示写操作接入规则：预览（不落库）+ 提交（落库）成对接口，请求体一致；提交支持 Idempotency-Key。
+写操作按接入规则实现：预览（不落库）+ 提交（落库）成对接口，请求体一致；提交支持 Idempotency-Key。
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import threading
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from systems import _demo_data as demo
+from systems import _sample_data as sample
 
 app = FastAPI(title="调度系统（模拟）", version="1.0.0", description="司机组（班组）划分的查询、预览与提交。")
 
@@ -23,7 +23,7 @@ def _initial_state() -> None:
     _state.clear()
     _idempotent.clear()
     for region, n_groups, prefix in (("east-china", 6, "华东"), ("north-china", 4, "华北")):
-        members = [d for d in demo.DRIVERS if d["region"] == region]
+        members = [d for d in sample.DRIVERS if d["region"] == region]
         assign = {}
         for i, d in enumerate(members):
             g = i % n_groups + 1
@@ -57,7 +57,7 @@ def _check(req: RegroupRequest) -> dict:
             if did in seen:
                 raise HTTPException(422, f"司机 {did} 出现在多个组中")
             seen.add(did)
-            d = demo.DRIVER_BY_ID.get(did)
+            d = sample.DRIVER_BY_ID.get(did)
             if d is None:
                 raise HTTPException(404, f"司机 {did} 不存在")
             if d["region"] != req.region:
@@ -76,7 +76,7 @@ def _diff(req: RegroupRequest, st: dict) -> tuple[list[dict], int, int]:
                 changes.append(
                     {
                         "driver_id": did,
-                        "name": demo.DRIVER_BY_ID[did]["name"],
+                        "name": sample.DRIVER_BY_ID[did]["name"],
                         "from_group": st["names"].get(before, f"第{before}组") if before else "未分组",
                         "to_group": st["names"].get(g.group_no, f"第{g.group_no}组"),
                     }
@@ -145,7 +145,7 @@ def apply_regroup(req: RegroupRequest, idempotency_key: str | None = Header(None
 
 @app.post("/api/_reset", include_in_schema=False)
 def reset() -> dict:
-    """演示用：恢复初始分组。"""
+    """联调与测试用：恢复初始分组。"""
     with _lock:
         _initial_state()
     return {"ok": True}

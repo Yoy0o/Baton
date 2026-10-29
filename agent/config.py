@@ -1,11 +1,14 @@
 """运行配置：全部来自环境变量，便于本地、容器和测试切换。"""
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
+from datetime import timedelta, timezone, tzinfo
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+log = logging.getLogger(__name__)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -36,8 +39,8 @@ class Settings:
     llm_temperature: float = field(default_factory=lambda: float(_env("LLM_TEMPERATURE", "0.2")))
     # 流式输出：模型接口不支持 stream 时自动退回一次性返回
     llm_stream: bool = field(default_factory=lambda: _env("LLM_STREAM", "true").lower() not in ("0", "false", "no", "off"))
-    # 演示模式下模拟流式输出的字间隔（秒），0 表示不模拟
-    demo_stream_delay_s: float = field(default_factory=lambda: float(_env("DEMO_STREAM_DELAY_S", "0.012")))
+    # 规则模式（未配置模型）下模拟流式输出的字间隔（秒），0 表示不模拟
+    rule_stream_delay_s: float = field(default_factory=lambda: float(_env("RULE_STREAM_DELAY_S", "0.012")))
 
     max_steps: int = field(default_factory=lambda: int(_env("AGENT_MAX_STEPS", "12")))
     confirm_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_CONFIRM_TIMEOUT_S", "600")))
@@ -46,12 +49,27 @@ class Settings:
     result_ttl_s: int = field(default_factory=lambda: int(_env("AGENT_RESULT_TTL_S", str(24 * 3600))))
     # 工具总数不超过该值时全量加载；超过时按系统关键词路由，只加载相关系统
     full_catalog_limit: int = field(default_factory=lambda: int(_env("AGENT_FULL_CATALOG_LIMIT", "30")))
-    demo_user: str = field(default_factory=lambda: _env("AGENT_DEMO_USER", "demo"))
+    # 未接 SSO 时所有请求归属的用户：对话、结果、审计、X-Agent-User 请求头都用它
+    default_user: str = field(default_factory=lambda: _env("AGENT_DEFAULT_USER", "local"))
+    # IANA 时区名：系统提示词里的“现在”和规则模式解析“今天”“明天”都按它计算
     timezone: str = field(default_factory=lambda: _env("AGENT_TZ", "Asia/Shanghai"))
 
     @property
     def llm_enabled(self) -> bool:
         return bool(self.llm_base_url and self.llm_model)
+
+    @property
+    def tzinfo(self) -> tzinfo:
+        """`timezone` 对应的时区对象。所有“现在几点 / 今天几号”都从这里取，保证模型模式和规则模式一致。"""
+        try:
+            from zoneinfo import ZoneInfo
+
+            return ZoneInfo(self.timezone)
+        except Exception:  # 时区名写错，或 Windows 缺少 tzdata
+            if self.timezone.upper() in ("UTC", "ETC/UTC"):
+                return timezone.utc
+            log.warning("无法识别时区 AGENT_TZ=%s，按东八区处理", self.timezone)
+            return timezone(timedelta(hours=8))
 
 
 def load_dotenv(path: Path | None = None) -> None:

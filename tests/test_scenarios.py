@@ -1,4 +1,4 @@
-"""端到端场景：运行时 + 网关 + 模拟系统 + 模拟界面页面，分别用演示规划器和 OpenAI 兼容接口（流式 / 非流式）驱动。"""
+"""端到端场景：运行时 + 网关 + 模拟系统 + 模拟界面页面，分别用规则规划器和 OpenAI 兼容接口（流式 / 非流式）驱动。"""
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +8,11 @@ from datetime import date
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
+
+from agent.llm import OpenAICompatLLM
+from agent.rule_planner import RulePlanner
+from agent.server import Platform
+
 from helpers import (
     REGROUP,
     Driver,
@@ -17,10 +22,6 @@ from helpers import (
     finished,
     tools_called,
 )
-
-from agent.demo_planner import DemoPlanner
-from agent.llm import OpenAICompatLLM
-from agent.server import Platform
 
 
 def test_regroup_with_map_and_writeback(settings, transport):
@@ -141,7 +142,7 @@ def test_shutdown_marks_running_task_interrupted(settings, transport):
         d = Driver(p)
         v0 = await dispatch_version(p)
         await p.gateway.ensure_loaded(force=True)
-        d.conv = p.conversations.create("demo", "关闭测试")
+        d.conv = p.conversations.create("local", "关闭测试")
         sess = p.runtime.session(d.conv)
         assert p.runtime.start(sess, REGROUP, d.client_id)
         d.confirm = None
@@ -181,8 +182,8 @@ def test_regenerate_replaces_last_run(settings, transport):
     asyncio.run(body())
 
 
-def _fake_llm_app(planner: DemoPlanner, seen: list[dict]) -> FastAPI:
-    """假的 OpenAI 兼容接口：决策仍由演示规划器完成，按请求返回 SSE 流或完整 JSON。"""
+def _fake_llm_app(planner: RulePlanner, seen: list[dict]) -> FastAPI:
+    """假的 OpenAI 兼容接口：决策仍由规则规划器完成，按请求返回 SSE 流或完整 JSON。"""
     fake = FastAPI()
 
     @fake.post("/v1/chat/completions")
@@ -227,7 +228,7 @@ def _fake_llm_app(planner: DemoPlanner, seen: list[dict]) -> FastAPI:
 
 
 def _run_with_fake_llm(settings, transport, stream: bool):
-    planner = DemoPlanner(settings)
+    planner = RulePlanner(settings)
     seen: list[dict] = []
 
     async def body():
@@ -243,13 +244,13 @@ def _run_with_fake_llm(settings, transport, stream: bool):
         assert all(bool(b.get("stream")) is stream for b in seen)
         assert "fleet__show_result_layer" in {t["function"]["name"] for t in seen[0]["tools"]}
         await p.http.aclose()
-        return events
+        return events, seen
 
     return asyncio.run(body())
 
 
 def test_openai_compatible_streaming(settings, transport):
-    events = _run_with_fake_llm(settings, transport, stream=True)
+    events, _ = _run_with_fake_llm(settings, transport, stream=True)
     deltas = "".join(e["delta"] for e in events if e["type"] == "text_delta")
     assert deltas == final_text(events)
     assert any(e["type"] == "reasoning_delta" for e in events)
@@ -261,5 +262,9 @@ def test_openai_compatible_streaming(settings, transport):
 
 
 def test_openai_compatible_non_streaming(settings, transport):
-    events = _run_with_fake_llm(settings, transport, stream=False)
+    settings.timezone = "Asia/Tokyo"
+    events, seen = _run_with_fake_llm(settings, transport, stream=False)
     assert not any(e["type"] == "text_delta" for e in events)
+    # 模型模式的系统提示词按 AGENT_TZ 给出“现在”，不再固定东八区
+    system = seen[0]["messages"][0]
+    assert system["role"] == "system" and "Asia/Tokyo，UTC+0900" in system["content"]

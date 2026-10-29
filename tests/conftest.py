@@ -1,6 +1,7 @@
 """测试夹具：不占端口，用 ASGI transport 把对模拟系统的 HTTP 请求直接路由到各系统的 app。"""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -41,14 +42,20 @@ def transport() -> RouterTransport:
     )
 
 
+# Settings 和接入清单读取的环境变量：测试前全部清掉，避免开发者终端里导出的配置改变测试结果
+_CONFIG_PREFIXES = ("APP_", "LLM_", "AGENT_", "RULE_")
+_MANIFEST_VARS = ("FLEET_URL", "TMS_URL", "DISPATCH_URL")
+
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch) -> Settings:
-    for var in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY", "LLM_STREAM", "FLEET_URL", "TMS_URL", "DISPATCH_URL", "APP_NAME"):
-        monkeypatch.delenv(var, raising=False)
+    for var in list(os.environ):
+        if var.startswith(_CONFIG_PREFIXES) or var in _MANIFEST_VARS:
+            monkeypatch.delenv(var, raising=False)
     s = Settings()
     s.data_dir = tmp_path / "data"
     s.web_dir = tmp_path / "no-web"  # 测试不依赖前端构建产物
     s.confirm_timeout_s = 5
     s.ui_call_timeout_s = 3
-    s.demo_stream_delay_s = 0
+    s.rule_stream_delay_s = 0
     return s

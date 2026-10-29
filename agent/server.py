@@ -1,6 +1,6 @@
 """服务入口：工作台页面、工作台 WebSocket、前端桥接 WebSocket、会话 / 结果 / 审计 API、MCP 调试端点。
 
-启动：python run_demo.py（同时启动模拟系统），或 uvicorn agent.main:app --port 8000
+启动：python run.py（同时启动模拟系统），或 uvicorn agent.main:app --port 8000
 """
 from __future__ import annotations
 
@@ -121,7 +121,7 @@ class UiActionBody(BaseModel):
 def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = settings or Settings()
     platform = Platform(settings, transport)
-    user = settings.demo_user  # 单用户演示；正式版本从 SSO 令牌解析
+    user = settings.default_user  # 未接 SSO：所有请求归属同一用户；接入后从 SSO 令牌解析
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -156,7 +156,7 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
         return {
             "app": {"name": settings.app_name, "tagline": settings.app_tagline, "version": __version__},
             "version": __version__,
-            "mode": "llm" if settings.llm_enabled else "demo",
+            "mode": "llm" if settings.llm_enabled else "rule",
             "planner": platform.llm.label,
             "agent_url": settings.public_url.rstrip("/"),
             "systems": [
@@ -195,7 +195,7 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             if format == "rows":
                 return JSONResponse({"rows": rows_of(res)})
         except ToolError as e:
-            raise HTTPException(status_code=404 if e.code == "RESULT_NOT_FOUND" else 400, detail=e.message)
+            raise HTTPException(status_code=404 if e.code == "RESULT_NOT_FOUND" else 400, detail=e.message) from e
         return JSONResponse({**res.meta(), "data": res.data, "rows": rows_of(res)[:2000]})
 
     @app.get("/api/audit")
