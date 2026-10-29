@@ -18,7 +18,7 @@ Baton 的目标是把设计文档 v0.1 的主干跑通：**Agent 只做编排，
 Agent 服务（agent/，FastAPI，端口 8000）
 ├─ 运行时 runtime.py        编排循环、停止 / 重新生成、确认等待、事件推送
 ├─ 对话 conversations.py     每个对话一个 JSON：标题、模型历史、可重放事件、反馈
-├─ 模型接入 llm.py           OpenAI 兼容接口（流式，含思考过程）；未配置时用 demo_planner.py
+├─ 模型接入 llm.py           OpenAI 兼容接口（流式，含思考过程）；未配置时用 rule_planner.py
 ├─ 能力网关 gateway.py       工具目录 · 参数校验 · 风险策略 · confirm_token · 审计
 │   ├─ API 适配   providers/openapi_provider.py   OpenAPI + 接入清单 → 工具 → HTTP 调用
 │   ├─ 前端桥接   providers/bridge_provider.py    页面注册的界面工具 → WebSocket 调用
@@ -26,7 +26,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 ├─ 结果仓库 results.py       result_id 句柄、类型识别、格式转换（data/results/）
 ├─ 审计 audit.py             data/audit.jsonl
 └─ /mcp                      MCP 调试端点（tools/list、tools/call 子集）
-▼ HTTP（X-Agent-User / X-Request-Id / Idempotency-Key）
+▼ HTTP（X-Agent-User / X-Agent-Session / X-Request-Id / Idempotency-Key）
 业务系统（systems/，各自独立进程）
 ├─ 车队追踪地图台 :8101    REST API + 地图页面
 ├─ 排班系统 :8102          REST API
@@ -59,7 +59,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 7. 同一轮并行调用两个展示工具：`fleet__show_result_layer` 经桥接 WebSocket 发到本窗口的地图页面，页面调用自己的 `addTempLayer` 叠加分组；`canvas__show` 发出 `render` 事件，工作台在“结果”页签展示分组。工作台的规则：这一轮操作了系统页面时，停留在系统页签，“结果”页签只亮提示点。
 8. `dispatch__preview_regroup(region, groups="res_C")`：网关把 `res_C` 转成分组列表，经 `adapter_hooks` 映射成调度系统的字段，调用预览接口；成功后网关签发 `confirm_token`，并保存这次预览的参数。
 9. `dispatch__apply_regroup(confirm_token)`：网关核对令牌（存在、未过期、属于本对话、工具匹配），通过运行时向工作台发 `confirm_request`（含变更清单）并等待。用户点“确认提交”后，网关**回放预览时保存的参数**调用提交接口，`Idempotency-Key` 为该令牌。
-10. 模型给出最终答复（`message`），运行结束（`run_finished`，演示模式附带追问建议）。每次工具调用都已写入审计日志；需要重放的事件已写入对话文件。
+10. 模型给出最终答复（`message`），运行结束（`run_finished`，规则模式附带追问建议）。每次工具调用都已写入审计日志；需要重放的事件已写入对话文件。
 
 ## 3. 关键机制
 
@@ -152,9 +152,9 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - 停止：取消运行任务；待确认的写操作作废（`confirm_resolved`，原因 `stopped`）；已输出的文字作为不完整答复保存；模型历史补齐悬空的工具结果并以说明收尾，下一轮可以继续对话。
 - 服务关闭：正在执行的任务记为 `interrupted`（不是“用户停止”）并保存；进程被强杀时，下次启动按文件补记中断。待确认的写操作不会在重启后被提交。
 
-### 3.7 演示模式（demo_planner.py）
+### 3.7 规则模式（rule_planner.py）
 
-未配置模型时，用规则脚本代替模型“规划”，按步骤产出与模型相同格式的工具调用，覆盖几类演示指令，并把最终答复按字逐段推送、附带追问建议。它与真实模型走同一条链路（运行时、网关、适配器、桥接、确认、审计），用于在没有模型密钥时验证架构与接入规则。配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。
+未配置模型时，用规则脚本代替模型“规划”，按步骤产出与模型相同格式的工具调用，覆盖几类内置指令，并把最终答复按字逐段推送、附带追问建议。它与真实模型走同一条链路（运行时、网关、适配器、桥接、确认、审计），用于在没有模型密钥时验证架构与接入规则。配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。
 
 ### 3.8 MCP 调试端点（POST /mcp）
 
@@ -184,20 +184,23 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `APP_NAME` / `APP_TAGLINE` | Baton / 多系统编排台 | 产品名与副标题（工作台标题、侧栏、服务名） |
-| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | 空 | OpenAI 兼容接口；不填为演示模式 |
+| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | 空 | OpenAI 兼容接口；不填为规则模式 |
 | `LLM_TIMEOUT_S` / `LLM_TEMPERATURE` | 90 / 0.2 | 模型调用超时与温度 |
 | `LLM_STREAM` | true | 流式输出；接口不支持时自动退回一次性返回 |
-| `DEMO_STREAM_DELAY_S` | 0.012 | 演示模式模拟逐字输出的间隔，0 为不模拟 |
+| `RULE_STREAM_DELAY_S` | 0.012 | 规则模式模拟逐字输出的间隔，0 为不模拟 |
 | `AGENT_HOST` / `AGENT_PORT` | 127.0.0.1 / 8000 | Agent 服务监听地址 |
-| `AGENT_PUBLIC_URL` | http://localhost:8000 | 浏览器访问 Agent 的地址（用于 CORS） |
+| `AGENT_PUBLIC_URL` | http://localhost:8000 | 浏览器访问 Agent 的地址：下发给内嵌系统页面连接桥接中心、读取结果，并作为 CORS 允许来源 |
 | `AGENT_DATA_DIR` | ./data | 对话、结果、审计、反馈的存放目录 |
 | `AGENT_WEB_DIR` | ./web/dist | 工作台构建产物目录 |
 | `AGENT_MANIFESTS` | systems/*/manifest.yaml | 接入清单位置 |
 | `AGENT_MAX_STEPS` | 12 | 单次运行最多调用模型的轮数 |
 | `AGENT_CONFIRM_TIMEOUT_S` | 600 | 等待用户确认的时长 |
 | `AGENT_UI_CALL_TIMEOUT_S` | 20 | 界面工具调用超时 |
+| `AGENT_HTTP_TIMEOUT_S` | 30 | 调用业务系统接口的 HTTP 超时 |
 | `AGENT_FULL_CATALOG_LIMIT` | 30 | 工具数超过该值时按关键词路由 |
 | `AGENT_RESULT_TTL_S` | 86400 | 结果保存时长 |
+| `AGENT_DEFAULT_USER` | local | 未接 SSO 时所有请求归属的用户：对话、结果、审计、`X-Agent-User` 请求头都用它 |
+| `AGENT_TZ` | Asia/Shanghai | IANA 时区名：系统提示词里的当前时间、规则模式解析“今天”“明天”都按它计算 |
 | `FLEET_URL` / `TMS_URL` / `DISPATCH_URL` | localhost:8101/8102/8103 | 模拟系统地址（清单中引用） |
 
 ## 6. 与设计文档 v0.1 的对应
@@ -217,7 +220,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 ## 7. 扩展点
 
 - 新增能力来源：在 `agent/providers/` 下实现 `specs()` 与 `call()`，在网关 `_dispatch` 中按 `kind` 分发。
-- 身份：在 `server.py` 中从 SSO 令牌解析用户替换 `demo_user`；在 `openapi_provider.py` 的请求头处加入令牌交换。
+- 身份：在 `server.py` 中从 SSO 令牌解析用户替换 `default_user`；在 `openapi_provider.py` 的请求头处加入令牌交换。
 - 持久化：对话目前是 JSON 文件，确认令牌在进程内存，结果仓库是内存 + 文件；替换为 PostgreSQL / Redis 时接口不变。
 - 模型：`llm.py` 的 `LLM` 协议只要求实现 `complete(messages, tools, on_delta=None)`。
 - 事件协议：目前为自定义事件，字段已按“运行 → 步骤 → 确认”组织；后续可映射到 AG-UI 事件模型，工作台与运行时之间的边界不变。

@@ -81,7 +81,7 @@
 
 ## 8. 身份与安全
 
-- **R8.1 [校验]** `auth.mode` 取值：`none`（仅限演示）、`static_bearer`（从 `token_env` 指定的环境变量读取令牌，加到 `Authorization: Bearer`）。以用户身份换取令牌的 `token_exchange` 在 v1 中未实现，配置会被拒绝。
+- **R8.1 [校验]** `auth.mode` 取值：`none`（仅限本地开发与测试）、`static_bearer`（从 `token_env` 指定的环境变量读取令牌，加到 `Authorization: Bearer`）。以用户身份换取令牌的 `token_exchange` 在 v1 中未实现，配置会被拒绝。
 - **R8.2** 系统必须自行校验权限，不能因为请求来自 Agent 就放行；界面工具运行在登录用户的页面里，后端接口同样要鉴权。
 - **R8.3** 所有工具调用由网关写入审计日志 `data/audit.jsonl`（用户、会话、工具、风险、参数摘要、结果、耗时、是否经确认）。
 - **R8.4** 系统返回的文本（备注、地址等）只作为数据使用；不要在返回值里放给模型的指令。

@@ -12,7 +12,7 @@ v0.2 把工作台重做成常规的 Agent 工作台（React + Ant Design X）：
 
 产品名可在 `.env` 里用 `APP_NAME` 修改（标题、侧栏、服务名都从这里读取），不需要改代码。
 
-架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)。
+架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。参与开发（包括用编码 Agent）先读 [AGENTS.md](AGENTS.md)。
 
 ## 快速开始
 
@@ -21,12 +21,12 @@ v0.2 把工作台重做成常规的 Agent 工作台（React + Ant Design X）：
 ```bash
 pip install -r requirements.txt
 cd web && npm install && npm run build && cd ..   # 构建工作台前端（发布包里已带构建好的 web/dist，可跳过）
-python run_demo.py
+python run.py
 ```
 
 浏览器打开 <http://localhost:8000>。右侧工作区“车队地图”页签上的圆点变成实心，说明地图页面已接入，可以开始。
 
-**演示模式**：没有配置模型时，Agent 用内置规则脚本代替模型规划，只认识下面几类指令，但走的是与真实模型完全相同的链路，答复也按字逐段推送。
+**规则模式**：没有配置模型时，Agent 用内置规则脚本代替模型规划，只认识下面几类指令，但走的是与真实模型完全相同的链路，答复也按字逐段推送。
 **接入真实模型**：复制 `.env.example` 为 `.env`，填写任意 OpenAI 兼容接口（需支持 tools / function calling，如通义千问、DeepSeek、智谱、Kimi、vLLM、Ollama 或 OpenAI），重启后可自由提问。默认使用流式输出，模型返回的思考过程（`reasoning_content`）会显示在答复上方，可展开。
 
 ```bash
@@ -35,7 +35,7 @@ LLM_MODEL=qwen-plus
 LLM_API_KEY=sk-...
 ```
 
-**前端开发**：`python run_demo.py` 启动后端，另开终端 `cd web && npm run dev`，打开 Vite 给出的地址（接口、桥接 SDK、WebSocket 都代理到 8000 端口）。
+**前端开发**：`python run.py` 启动后端，另开终端 `cd web && npm run dev`，打开 Vite 给出的地址（接口、桥接 SDK、WebSocket 都代理到 8000 端口）。
 
 ## 工作台
 
@@ -53,7 +53,7 @@ LLM_API_KEY=sk-...
 
 ## 验证清单
 
-按顺序在工作台输入（新对话页的常用任务、输入 `/` 都可一键填入）。数字基于内置演示数据，首次运行时应一致。
+按顺序在工作台输入（新对话页的常用任务、输入 `/` 都可一键填入）。数字基于内置样例数据，首次运行时应一致。
 
 | # | 操作 | 应看到 | 验证的设计点 |
 | --- | --- | --- | --- |
@@ -91,7 +91,7 @@ agent/                Agent 服务
   results.py            结果仓库与格式转换
   analytics.py          带人数上限的空间分组算法
   manifest.py           接入清单模型与规则校验
-  llm.py / demo_planner.py   OpenAI 兼容模型接入（流式）/ 演示模式
+  llm.py / rule_planner.py   OpenAI 兼容模型接入（流式）/ 规则模式
   check.py              接入检查命令
 web/                  工作台前端（React + Ant Design X + Vite），构建产物在 web/dist
   src/App.tsx           布局、会话、实时事件
@@ -101,9 +101,11 @@ sdk/agent-bridge.js   前端桥接 SDK（接口对齐 WebMCP）
 systems/              三个模拟业务系统，各带 manifest.yaml、SKILL.md
   fleet/                车队追踪地图台：REST API + 地图页面（页面末尾是接入代码）
   tms/                  排班系统：REST API
-  dispatch/             调度系统：REST API（预览 / 提交），adapter_hooks.py 演示格式映射
+  dispatch/             调度系统：REST API（预览 / 提交），adapter_hooks.py 格式映射示例
 tests/                测试
 docs/                 架构说明、接入规则
+  adr/                  架构决策记录（为什么这样设计）
+  devlog/               开发日志（每次开发任务的改动、验证、遗留问题）
 ```
 
 ## 接入你自己的系统
@@ -117,11 +119,11 @@ docs/                 架构说明、接入规则
 
 ## v0.2 的边界
 
-- 单用户演示：未接 SSO；系统鉴权只支持 `none` / `static_bearer`。
+- 单用户：未接 SSO（所有请求归属 `AGENT_DEFAULT_USER`）；系统鉴权只支持 `none` / `static_bearer`。
 - 对话保存在 `data/conversations/`（每个对话一个 JSON 文件）；确认令牌在进程内存中，服务重启后待确认的写操作作废（如实显示为中断）；结果保存 24 小时。
 - 不支持编辑已发送的消息、分支对话、附件上传；“重新生成”只针对最后一条回复。
 - 界面工具只支持内嵌在工作台中的页面（内嵌模式），只能是只改界面或只读。
 - 工具超过 30 个时只做关键词路由，没有向量检索；没有程序化工具调用、长任务、子 Agent、MCP Apps、自动化兜底。
 - `/mcp` 只实现 `initialize`、`tools/list`、`tools/call`，用于调试。
 - 分组算法为纯 Python，适合 2000 个点以内；结果页的点位预览为轻量示意图，完整地图交互在业务系统页面里。
-- 演示模式只识别上表几类指令。
+- 规则模式只识别上表几类指令。
