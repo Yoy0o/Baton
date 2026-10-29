@@ -1,2 +1,4 @@
 -r requirements.txt
 pytest>=8.0
+# 代码检查：版本精确锁定，本地与 CI 结果一致（配置在 pyproject.toml）
+ruff==0.14.4

@@ -1,0 +1,8 @@
+# 仓库内统一 LF：Windows 检出也保持 LF，前端构建产物的哈希与 CI（Linux）一致，dist 检查才可靠
+* text=auto eol=lf
+
+*.svg text eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

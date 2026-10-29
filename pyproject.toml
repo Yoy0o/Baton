@@ -1,0 +1,20 @@
+# 只放工具配置；依赖仍以 requirements*.txt 为准（运行方式是源码目录直接启动，不打包）。
+
+[tool.ruff]
+target-version = "py310"
+line-length = 140
+extend-exclude = ["web", "data"]
+
+[tool.ruff.lint]
+# E/W 风格错误、F 未用变量与未定义名、I 导入排序、UP 新语法、B 常见陷阱
+select = ["E", "W", "F", "I", "UP", "B"]
+# E501：现有代码有较长的中文字符串和描述，行宽不强制，只靠评审把关
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent", "systems"]
+# tests/ 下的辅助模块以顶层名导入（pytest rootdir 插入路径）
+known-local-folder = ["helpers"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
