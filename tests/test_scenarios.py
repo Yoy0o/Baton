@@ -37,6 +37,7 @@ def test_regroup_with_map_and_writeback(settings, transport):
         ]
         assert all(e.get("ok") for e in events if e["type"] == "tool_call_finished")
         assert all(e["conversation_id"] == d.conv.id for e in events)
+        assert events[0]["type"] == "run_started" and events[0]["intent"]["id"] == "regroup"
         started = [e for e in events if e["type"] == "tool_call_started"]
         assert started[0]["system_title"] == "排班系统" and started[0]["color"] == "#7C3AED"
         assert started[2]["system"] == "analytics" and started[2]["title"] == "空间分组"
@@ -90,6 +91,24 @@ def test_stops_and_track(settings, transport):
         await d.say("回放司机 D0012 今天的轨迹")
         assert page.calls[-1][0] == "play_track" and page.calls[-1][1]["driver_id"] == "D0012"
         assert abs((date.fromisoformat(page.calls[-1][1]["date"]) - date.today()).days) <= 1
+        await p.http.aclose()
+
+    asyncio.run(body())
+
+
+def test_missing_slot_and_unknown_request(settings, transport):
+    """剧本声明了必需的参数：没给司机 ID 时先问清楚，而不是猜一个；识别不到的请求给出帮助。"""
+
+    async def body():
+        p = Platform(settings, transport)
+        FakePage(p)
+        d = Driver(p)
+        events = await d.say("回放轨迹")
+        assert events[0]["intent"]["id"] == "track" and tools_called(events) == []
+        assert "哪位司机" in final_text(events) and finished(events)["suggestions"] == ["回放司机 D0012 今天的轨迹"]
+        events = await d.say("介绍一下你能做什么")
+        assert events[0]["intent"] is None and "规则模式" in final_text(events)
+        assert len(finished(events)["suggestions"]) == 3
         await p.http.aclose()
 
     asyncio.run(body())
@@ -268,3 +287,7 @@ def test_openai_compatible_non_streaming(settings, transport):
     # 模型模式的系统提示词按 AGENT_TZ 给出“现在”，不再固定东八区
     system = seen[0]["messages"][0]
     assert system["role"] == "system" and "Asia/Tokyo，UTC+0900" in system["content"]
+    # 识别出的意图、已取出的参数和建议步骤作为参考写进系统提示词
+    assert "本轮任务识别" in system["content"] and "“重组司机组”" in system["content"]
+    assert 'tms__search_shift_drivers(region="east-china"' in system["content"] and "max_size=8" in system["content"]
+    assert events[0]["intent"]["id"] == "regroup"

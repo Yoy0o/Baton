@@ -103,6 +103,8 @@ _SPECS: list[ToolSpec] = [
     ),
 ]
 
+BUILTIN_TOOLS = frozenset(s.name for s in _SPECS)
+
 
 class BuiltinProvider:
     def __init__(self, store: ResultStore):

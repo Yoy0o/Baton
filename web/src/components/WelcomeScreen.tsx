@@ -1,13 +1,14 @@
 import { Prompts, Welcome } from '@ant-design/x';
 import type { CSSProperties } from 'react';
 import { bridgeTools, useWorkbench } from '../context';
-import { TASK_PRESETS } from './Composer';
+import { useTaskPresets } from '../presets';
 import { LogoMark } from './Logo';
 
 /** 新对话的空白页：说明能做什么，并给出可以直接发送的任务。 */
 export function WelcomeScreen({ onPick }: { onPick: (prompt: string) => void }) {
   const { config, systemsMeta, bridges } = useWorkbench();
   const systems = config?.systems || [];
+  const presets = useTaskPresets();
 
   return (
     <div className="bt-welcome">
@@ -35,7 +36,7 @@ export function WelcomeScreen({ onPick }: { onPick: (prompt: string) => void }) 
         className="bt-presets"
         title="试试这些任务"
         wrap
-        items={TASK_PRESETS.slice(0, 4).map((t) => ({
+        items={presets.slice(0, 4).map((t) => ({
           key: t.key,
           icon: t.icon,
           label: t.label,
@@ -51,7 +52,7 @@ export function WelcomeScreen({ onPick }: { onPick: (prompt: string) => void }) 
           ),
         }))}
         onItemClick={({ data }) => {
-          const preset = TASK_PRESETS.find((t) => t.key === data.key);
+          const preset = presets.find((t) => t.key === data.key);
           if (preset) onPick(preset.prompt);
         }}
       />

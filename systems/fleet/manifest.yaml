@@ -53,3 +53,4 @@ ui_bridge:
     - {tool: play_track, risk: view, title: 轨迹回放}
 
 skill: SKILL.md
+playbooks: playbooks.yaml        # 场景剧本：意图识别 + 规则模式步骤（INTEGRATION_RULES 第 11 节）

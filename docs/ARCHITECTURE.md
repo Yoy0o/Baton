@@ -13,12 +13,15 @@ Baton 的目标是把设计文档 v0.1 的主干跑通：**Agent 只做编排，
 │    └─ iframe：车队地图页面（systems/fleet/static/map.html）+ agent-bridge.js
 │                      │ WebSocket /ws/bridge?system&client（注册界面工具、执行调用、上报界面状态）
 │ WebSocket /ws/workbench?client（用户消息、停止、重新生成、确认决定 ↔ 运行事件）
-│ REST /api/*（配置、对话、结果、工具目录、审计、反馈、用户直接调用界面工具）
+│ REST /api/*（配置、对话、结果、工具目录、审计、反馈、场景识别调试、用户直接调用界面工具）
 ▼
 Agent 服务（agent/，FastAPI，端口 8000）
 ├─ 运行时 runtime.py        编排循环、停止 / 重新生成、确认等待、事件推送
+│   ├─ 意图识别 intents.py   场景剧本（各系统 playbooks.yaml）→ 意图 + 槽位（slots.py），只做规则匹配
+│   ├─ 提示词 prompt.py      工作规则 · 环境 · 本轮任务识别 · 系统知识包
+│   └─ 执行器 executor.py    相邻的只读调用并行、写操作单独执行；推送执行过程事件
 ├─ 对话 conversations.py     每个对话一个 JSON：标题、模型历史、可重放事件、反馈
-├─ 模型接入 llm.py           OpenAI 兼容接口（流式，含思考过程）；未配置时用 rule_planner.py
+├─ 模型接入 llm.py           OpenAI 兼容接口（流式，含思考过程）；未配置时用 rule_planner.py（按剧本执行，playbook.py）
 ├─ 能力网关 gateway.py       工具目录 · 参数校验 · 风险策略 · confirm_token · 审计
 │   ├─ API 适配   providers/openapi_provider.py   OpenAPI + 接入清单 → 工具 → HTTP 调用
 │   ├─ 前端桥接   providers/bridge_provider.py    页面注册的界面工具 → WebSocket 调用
@@ -36,7 +39,8 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | 组件 | 职责 | 不做什么 |
 | --- | --- | --- |
 | 工作台 | 管理对话；展示每一步工具调用；弹确认卡片；内嵌系统页面；展示结果 | 不直接调用业务系统 |
-| 运行时 | 选工具、调模型、执行工具调用、把结果回填给模型、请求确认、推送事件 | 不处理具体系统的格式和鉴权 |
+| 运行时 | 识别意图、选工具、调模型、执行工具调用、把结果回填给模型、请求确认、推送事件 | 不处理具体系统的格式和鉴权；不写死任何场景 |
+| 场景剧本 | 声明常见任务的触发词、参数、步骤、答复模板；规则模式按它执行，模型模式作为提示，路由作为参考 | 不直接调用工具（经运行时 → 网关）；不放宽确认 |
 | 对话存储 | 保存模型历史（继续对话用）和工作台事件（重放用） | 不保存业务主数据 |
 | 能力网关 | 统一的工具入口；校验参数；按风险等级放行或要求确认；记审计 | 不做规划，不保存对话 |
 | 适配器 | 把一种能力来源变成工具：API、界面、内置 | 不决定何时调用 |
@@ -51,8 +55,8 @@ Agent 服务（agent/，FastAPI，端口 8000）
 ## 2. 一次请求的链路（以“司机组重组并同步到调度系统”为例）
 
 1. 用户在新对话里输入；工作台通过 `/ws/workbench` 发送 `user_message`（不带 `conversation_id`）。服务端创建对话，回 `conversation_created`，工作台把地址改成 `#/c/<对话 ID>`。
-2. 运行时开始一次运行（`run_started`），由网关给出本次可用工具：API 工具 + 本窗口已接入页面注册的界面工具 + 内置工具。工具总数超过 30 个时按清单 `keywords` 只加载相关系统。
-3. 运行时组装系统提示词（规则、已打开的界面、界面状态、本对话结果列表、相关系统的 SKILL.md），流式调用模型；文字和思考过程以 `text_delta` / `reasoning_delta` 推给工作台。
+2. 运行时开始一次运行：先按场景剧本识别意图（只做规则匹配，不调用模型），这句话命中 dispatch 的 `regroup`，取出 `region=east-china`、`date=明天`、`groups=5`、`max_size=8`、`sync=true`；`run_started` 事件附带识别结果。再由网关给出本次可用工具：API 工具 + 本窗口已接入页面注册的界面工具 + 内置工具。工具总数超过 30 个时只加载相关系统：清单 `keywords` 命中的、识别出的意图引用的、上一轮用过的。
+3. 运行时组装系统提示词（规则、已打开的界面、界面状态、本对话结果列表、本轮任务识别——意图、参数、建议步骤，相关系统的 SKILL.md），流式调用模型；文字和思考过程以 `text_delta` / `reasoning_delta` 推给工作台。规则模式下“模型”是按 `regroup` 剧本逐步推进的 `RulePlanner`，下面的步骤完全相同。
 4. 模型返回工具调用 `tms__search_shift_drivers` → 网关校验参数 → API 适配器按 OpenAPI 拼出 HTTP 请求 → 排班系统返回 38 条 → 网关存为结果 `res_A`，只把摘要、总数、字段和 5 条预览交给模型。
 5. `fleet__get_driver_positions(driver_ids="res_A")`：清单声明了 `accepts_result: {as: ids, field: driver_id}`，网关取出 `res_A` 的 `driver_id` 列，以逗号分隔传给车队系统 → `res_B`（带坐标，自动识别为 `feature_collection`）。
 6. `analytics__run_grouping(points="res_B", groups=5, max_size=8)`：内置分组 → `res_C`（`group_plan`）。
@@ -79,7 +83,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
  "fix_hint": "检查参数取值是否符合工具描述", "retryable": false}
 ```
 
-网关从不向上抛异常：参数不合法、系统报错、界面未打开、令牌无效等都变成带 `fix_hint` 的错误信封，模型据此自我修正。
+网关从不向上抛异常：参数不合法、系统报错、界面未打开、令牌无效等都变成带 `fix_hint` 的错误信封，模型据此自我修正。同一次运行里，工具名和参数都相同、且上次以不可重试的错误失败的调用，网关直接返回 `REPEATED_CALL`（照常记审计），不再调用系统，避免模型原样空转重试（`UI_NOT_CONNECTED` 除外：用户可能在运行中打开页面）；失败记录放在每次运行新建的 `CallContext.failures` 里。
 
 ### 3.2 结果仓库与引用（results.py）
 
@@ -130,7 +134,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | --- | --- | --- |
 | `hello` | 连接建立，附当前桥接状态 | 否 |
 | `conversation_created` | 新对话的 ID、标题、时间 | 否 |
-| `run_started` / `run_finished` / `run_error` | 一次运行的开始、结束（`completed` / `stopped` / `error` / `interrupted`，附追问建议）、失败 | 是 |
+| `run_started` / `run_finished` / `run_error` | 一次运行的开始（附识别出的意图 `intent: {id, title, system, score}`，没识别到为 `null`）、结束（`completed` / `stopped` / `error` / `interrupted`，附追问建议）、失败 | 是 |
 | `text_delta` / `reasoning_delta` | 逐字输出的答复 / 思考过程 | 否（由 `thought`、`message` 保存最终文本） |
 | `thought` | 模型在调用工具前说的话及思考过程 | 是 |
 | `tool_call_started` / `tool_call_finished` | 每次工具调用：标题、所属系统及其标识色、类型、风险、参数、结果摘要、错误、耗时 | 是 |
@@ -152,9 +156,16 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - 停止：取消运行任务；待确认的写操作作废（`confirm_resolved`，原因 `stopped`）；已输出的文字作为不完整答复保存；模型历史补齐悬空的工具结果并以说明收尾，下一轮可以继续对话。
 - 服务关闭：正在执行的任务记为 `interrupted`（不是“用户停止”）并保存；进程被强杀时，下次启动按文件补记中断。待确认的写操作不会在重启后被提交。
 
-### 3.7 规则模式（rule_planner.py）
+### 3.7 意图识别与场景剧本（intents.py、slots.py、playbook.py、rule_planner.py）
 
-未配置模型时，用规则脚本代替模型“规划”，按步骤产出与模型相同格式的工具调用，覆盖几类内置指令，并把最终答复按字逐段推送、附带追问建议。它与真实模型走同一条链路（运行时、网关、适配器、桥接、确认、审计），用于在没有模型密钥时验证架构与接入规则。配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。
+各系统可以随接入清单提供场景剧本（`playbooks.yaml`，规则见接入规则第 11 节，设计理由见 ADR-0011）：一个意图 = 触发词与优先级 + 槽位 + 前置条件 + 步骤（`call` / `show` / `write`）+ 答复模板与追问建议。加载时校验工具名、模板引用，并保证剧本不能绕过两段式写入（`call` 步骤不得调用写操作，写操作只能用 `write` 步骤）。
+
+- **识别**（`IntentLibrary.classify`）：排除命中 `none` 的，要求 `all` 全中、`any` 至少中一个、`match.slots` 都取到值；按（优先级，命中项数）排序。槽位按类型提取（`slots.py`：日期、数量、时长、区域、ID、指派……），`from_call` 让追问沿用上一轮的参数。每次运行开始时识别一次，出错时当作没识别到。
+- **规则模式**：未配置模型时，`RulePlanner` 只做“识别 → 按剧本推进一步”（`playbook.PlaybookRunner`）：每次被调用时从消息历史推导本轮做到哪一步（`transcript.py`），产出下一组工具调用或最终答复，最终答复按字逐段推送并附追问建议。它与真实模型走同一条链路（运行时、网关、适配器、桥接、确认、审计），所以也能藏在假的 OpenAI 兼容接口后面驱动测试。识别不到时返回由剧本自动生成的帮助文本。
+- **模型模式**：识别结果写进系统提示词的“本轮任务识别”一节（意图、已取出的参数、建议步骤、未满足的前置条件、其他可能），标明仅供参考；识别不到时不加这一节。
+- **路由与工作台**：识别出的意图引用的系统交给网关路由（`prefer`）；可单独发起的意图作为工作台“常用任务”（`/api/config` 的 `presets`）；`GET /api/intents?text=` 只识别不执行，返回命中项、槽位和给模型的提示，供接入方调试。
+
+配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。
 
 ### 3.8 MCP 调试端点（POST /mcp）
 
@@ -167,7 +178,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | 区域 | 用到的组件 | 说明 |
 | --- | --- | --- |
 | 对话列表 | `Conversations` | 按时间分组；执行中、待确认状态；重命名、删除；搜索 |
-| 新对话页 | `Welcome`、`Prompts` | 已接入系统、常用任务（下方色条表示会经过哪些系统） |
+| 新对话页 | `Welcome`、`Prompts` | 已接入系统、常用任务（来自各系统场景剧本，下方色条表示会经过哪些系统） |
 | 消息 | `Bubble.List` | 用户消息靠右；助手回复占满整列 |
 | 思考过程 | `Think` | 模型返回 `reasoning_content` 时显示，默认折叠 |
 | 执行过程 | `ThoughtChain`（自定义节点） | 每次工具调用一个站点，颜色是系统标识色；运行中、出错、待确认时展开，完成后折叠为线路缩略 |
@@ -212,15 +223,18 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | 3.2 前端桥接 | 已实现（内嵌模式） | 按工作台窗口配对；独立模式（系统自己的标签页）未做 |
 | 3.3 自动化兜底 | 未实现 | 后续版本 |
 | 3.4 接入清单 | 已实现 | 字段见接入规则第 10 节；`python -m agent.check` 校验 |
-| 4 Function Calling 规范 | 已实现 | 命名、信封、错误、两段式写入、关键词路由；向量检索与程序化调用未做 |
+| 4 Function Calling 规范 | 已实现 | 命名、信封、错误、两段式写入、关键词 + 意图 + 上一轮系统路由；向量检索与程序化调用未做 |
 | 5 结果与可视化 | 部分实现 | 结果仓库、回填原系统、工作台“结果”页签；MCP Apps 未做 |
-| 6 运行时 | 部分实现 | 单编排 Agent、知识包、界面状态、模型网关、对话保存、停止与重新生成；长任务、子 Agent 未做 |
+| 6 运行时 | 部分实现 | 单编排 Agent、意图识别与场景剧本、知识包、界面状态、模型网关、对话保存、停止与重新生成；长任务、子 Agent 未做 |
 | 7 安全与治理 | 部分实现 | 风险分级、确认、审计（区分 Agent 与用户直接操作）、令牌绑定对话；SSO、Token Exchange、角色过滤、OpenTelemetry 未做 |
 
 ## 7. 扩展点
 
+- 新增场景：在系统目录写 `playbooks.yaml` 并在清单里引用，规则模式、模型提示、路由、常用任务自动生效，不改 Python；用 `/api/intents?text=` 调试。
+- 新增槽位类型：在 `agent/slots.py` 用 `@extractor("类型名", {参数…})` 注册。
+- 运行时扩展：提示词改 `prompt.py`；工具调度策略（并行分批）改 `executor.py`；规划前的识别与路由改 `runtime._plan_turn`。
 - 新增能力来源：在 `agent/providers/` 下实现 `specs()` 与 `call()`，在网关 `_dispatch` 中按 `kind` 分发。
 - 身份：在 `server.py` 中从 SSO 令牌解析用户替换 `default_user`；在 `openapi_provider.py` 的请求头处加入令牌交换。
 - 持久化：对话目前是 JSON 文件，确认令牌在进程内存，结果仓库是内存 + 文件；替换为 PostgreSQL / Redis 时接口不变。
-- 模型：`llm.py` 的 `LLM` 协议只要求实现 `complete(messages, tools, on_delta=None)`。
+- 模型：`llm.py` 的 `LLM` 协议只要求实现 `complete(messages, tools, on_delta=None)`；规则模式的 `RulePlanner` 也只实现这一个方法。
 - 事件协议：目前为自定义事件，字段已按“运行 → 步骤 → 确认”组织；后续可映射到 AG-UI 事件模型，工作台与运行时之间的边界不变。

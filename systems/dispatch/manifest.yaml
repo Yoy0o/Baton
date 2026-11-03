@@ -35,3 +35,4 @@ api:
         request: systems.dispatch.adapter_hooks:group_plan_to_body
 
 skill: SKILL.md
+playbooks: playbooks.yaml        # 场景剧本：意图识别 + 规则模式步骤（INTEGRATION_RULES 第 11 节）

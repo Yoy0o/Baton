@@ -18,6 +18,7 @@ import httpx
 
 from .config import Settings, load_dotenv
 from .contracts import TOOL_NAME_RE
+from .intents import IntentLibrary
 from .manifest import ManifestError, load_manifests
 from .providers.openapi_provider import OpenAPIProvider
 from .results import ResultStore
@@ -37,6 +38,7 @@ async def run(pattern: str, verbose: bool) -> int:
 
     errors = warnings = 0
     store = ResultStore(Path(tempfile.mkdtemp()))
+    generated: set[str] = set()  # 已生成的 API 工具名，用来核对剧本引用
     async with httpx.AsyncClient() as http:
         for m in manifests:
             print(f"\n== {m.system} · {m.title}  ({m.path})")
@@ -46,6 +48,7 @@ async def run(pattern: str, verbose: bool) -> int:
                 for err in provider.errors:
                     print("  ✗", err)
                     errors += 1
+                generated |= {s.name for s in provider.specs()}
                 for spec in provider.specs():
                     params = ", ".join(spec.input_schema.get("properties", {})) or "—"
                     pair = f"  → 确认后提交 {spec.pairs_with}" if spec.pairs_with else ""
@@ -64,6 +67,20 @@ async def run(pattern: str, verbose: bool) -> int:
             if not m.skill_text:
                 print("  ! 未提供 SKILL.md 知识包（建议，R6.2）")
                 warnings += 1
+            for spec in m.intents:
+                print(f"  ◆ 场景 {spec.id:<14} 优先级 {spec.priority:<4} {spec.title}：{spec.examples[0]}")
+        library = IntentLibrary(manifests)
+        api_systems = {m.system for m in manifests if m.api}
+        for it in library.intents:
+            for tool in it.tools():
+                system, _, local = tool.partition("__")
+                m = next((x for x in manifests if x.system == system), None)
+                if m and system in api_systems and m.api_tool(local) and tool not in generated:
+                    print(f"  ! 场景 {it.id} 引用的 {tool} 未能生成（见上方该系统的错误），规则模式执行到这一步会失败")
+                    warnings += 1
+        for w in library.warnings():
+            print(f"  ! {w}")
+            warnings += 1
     print(f"\n结果：{len(manifests)} 个系统，{errors} 个错误，{warnings} 个提醒")
     return 1 if errors else 0
 

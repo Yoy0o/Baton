@@ -37,6 +37,15 @@ def test_config_and_tools(settings, transport):
         assert fleet["embed_url"].endswith("/map") and fleet["color"] == "#2563EB"
         assert {"tool": "play_track", "title": "轨迹回放"} in fleet["ui_tools"]
         assert cfg["systems_meta"]["analytics"]["builtin"] is True
+        assert [p["id"] for p in cfg["presets"]] == ["regroup", "stops", "track", "locate"]
+        assert cfg["presets"][0]["prompt"].startswith("把华东区明天早班") and cfg["presets"][0]["icon"] == "team"
+        # 场景剧本调试：只识别，不执行
+        intents = c.get("/api/intents").json()
+        assert {i["id"] for i in intents["intents"]} >= {"regroup", "adjust", "sync", "stops", "track", "locate"}
+        assert intents["warnings"] == [] and "matches" not in intents
+        probe = c.get("/api/intents", params={"text": "把北京晚班的司机分成 4 组"}).json()
+        assert probe["matches"][0]["id"] == "regroup" and probe["matches"][0]["slots"]["groups"] == 4
+        assert probe["matches"][0]["slots"]["region"] == "north-china" and "建议步骤" in probe["hint"]
         tools = {t["name"]: t for t in c.get("/api/tools").json()["tools"]}
         assert tools["dispatch__apply_regroup"]["risk"] == "write"
         assert tools["tms__search_shift_drivers"]["system_title"] == "排班系统"

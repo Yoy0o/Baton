@@ -10,6 +10,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -34,8 +35,10 @@ from .config import ROOT, Settings
 from .contracts import ToolError, for_model
 from .conversations import ConversationStore, make_title
 from .gateway import Gateway
+from .intents import IntentLibrary
 from .llm import make_llm
 from .manifest import load_manifests
+from .playbook import describe
 from .providers import CallContext
 from .providers.bridge_provider import BridgeHub
 from .results import ResultStore, geojson_of, rows_of
@@ -60,8 +63,11 @@ class Platform:
         self._send_locks: dict[str, asyncio.Lock] = {}
         self.hub = BridgeHub({m.system: m for m in self.manifests}, on_change=self.broadcast_bridge_status)
         self.gateway = Gateway(settings, self.manifests, self.store, self.hub, self.audit, self.http)
-        self.llm = make_llm(settings, self.http)
-        self.runtime = AgentRuntime(settings, self.gateway, self.store, self.llm, self.conversations, self.send)
+        self.intents = IntentLibrary(self.manifests)  # 场景剧本：意图识别、规则模式执行、路由参考（ADR-0011）
+        self.llm = make_llm(settings, self.http, self.intents)
+        self.runtime = AgentRuntime(
+            settings, self.gateway, self.store, self.llm, self.conversations, self.send, intents=self.intents
+        )
 
     async def send(self, client_id: str, event: dict[str, Any]) -> None:
         """把事件发给某个工作台窗口；窗口不在线时丢弃（事件已写入会话，重新打开时重放）。"""
@@ -173,9 +179,39 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
                 for m in platform.manifests
             ],
             "systems_meta": platform.gateway.systems_meta(),
+            "presets": platform.intents.presets(),
             "load_errors": platform.gateway.load_errors(),
             "bridges": platform.hub.status(),
         }
+
+    @app.get("/api/intents")
+    async def intents(text: str = Query("", max_length=_TEXT_LIMIT), client: str = Query("", max_length=64)) -> dict[str, Any]:
+        """场景剧本列表；带 text 时返回识别结果（不调用模型、不执行），接入方用它调试触发词和槽位。"""
+        lib = platform.intents
+        out: dict[str, Any] = {
+            "intents": [
+                {
+                    "id": i.id,
+                    "title": i.title,
+                    "system": i.system,
+                    "priority": i.spec.priority,
+                    "examples": i.spec.examples,
+                    "systems": i.systems(),
+                    "available": not i.unavailable,
+                    "unavailable": i.unavailable or None,
+                }
+                for i in lib.intents
+            ],
+            "warnings": lib.warnings(),
+        }
+        if text:
+            await platform.gateway.ensure_loaded()
+            today = datetime.now(settings.tzinfo).date()
+            matches = lib.classify(text, today=today)
+            tools = {s.name for s in platform.gateway.catalog(client, user)}
+            out["matches"] = [{**m.brief(), "hits": m.hits, "slots": m.slots} for m in matches]
+            out["hint"] = describe(lib, matches, tools)
+        return out
 
     @app.get("/api/tools")
     async def tools(client: str = Query("", max_length=64), session: str = Query("", max_length=64)) -> dict[str, Any]:

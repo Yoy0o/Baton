@@ -1,6 +1,10 @@
 """Agent 运行时：每个会话一个编排循环。
 
-循环：选工具 → 调模型（流式）→ 执行工具调用（只读 / 只改界面的可并行）→ 结果回填 → 直到模型给出最终答复。
+一次运行（run）：
+1. 识别意图（intents.py，按场景剧本规则匹配，不调用模型）→ 按意图和上一轮用过的系统选工具（网关路由）；
+2. 循环：组装系统提示词（prompt.py，含本轮任务识别）→ 调模型（流式）→ 执行工具调用（executor.py，
+   相邻的只读 / 只改界面调用并行，写操作单独执行）→ 结果回填 → 直到模型给出最终答复。
+规则模式下“模型”就是按场景剧本执行的 RulePlanner，链路完全相同（ADR-0009、ADR-0011）。
 - 写操作的确认由网关回调 _ask_confirm 发起：工作台弹确认卡片，用户决定后循环继续。
 - 停止：取消该会话的运行任务；未确认的写操作不会执行；模型历史会补齐后再保存，下一轮可以继续对话。
 - 重新生成：撤掉最后一次运行（事件与历史），用同一句话重新运行。
@@ -19,17 +23,22 @@ from datetime import datetime
 from typing import Any
 
 from .config import Settings
-from .contracts import ToolError, ToolSpec, error_envelope, for_model
+from .contracts import ToolError, ToolSpec, for_model
 from .conversations import (
     EPHEMERAL_EVENTS,
     Conversation,
     ConversationStore,
     repair_history,
 )
+from .executor import ToolExecutor
 from .gateway import Gateway, PendingConfirm
+from .intents import IntentLibrary, IntentMatch
 from .llm import LLM, LLMError
+from .playbook import describe
+from .prompt import PromptBuilder
 from .providers import CallContext
 from .results import ResultStore
+from .transcript import Transcript
 
 log = logging.getLogger("agent.runtime")
 
@@ -56,22 +65,22 @@ class Session:
         return any(not f.done() for f in self.waiters.values())
 
 
-SYSTEM_PROMPT = """你是“{app_name}”，一个多系统编排助手：通过工具调度多个业务系统完成用户的任务。现在是 {now}。
+@dataclass
+class Turn:
+    """一次运行的规划上下文：识别出的意图、路由偏好、当前可用的工具。"""
 
-工作规则：
-1. 只依据工具返回的数据作答，不编造数据；数据不够时说明缺什么。
-2. 列表数据只通过 result_id 在工具之间传递，不要手抄、改写或编造 result_id。
-3. 写操作：先调用 *_preview 拿到变更和 confirm_token，再调用对应的 *_apply 并传入 confirm_token。运行时会向用户展示确认卡片并等待决定，你不要在文字里征求确认，也不要伪造 confirm_token。用户拒绝后不要重复提交。
-4. 展示结果：用户已打开对应系统界面时，优先用该系统的界面工具（如 fleet__show_result_layer）；否则用 canvas__show 在工作台展示。
-5. 汇总类问题（数量、分布、最大最小）用 results__stats 计算，不要心算。
-6. 坐标统一 WGS84（经度, 纬度）。
-7. 工具报错时先读 fix_hint，修正后最多重试一次；仍失败就如实告诉用户。
-8. 用中文回复，先给结论，简洁；可用 Markdown 列表；引用结果时写出 result_id（用反引号包起来）。
+    text: str
+    matches: list[IntentMatch]
+    prefer: set[str]  # 路由时优先保留的系统：意图引用的系统 + 上一轮用过的系统
+    specs: list[ToolSpec] = field(default_factory=list)
 
-已打开的系统界面：{ui}
-界面当前状态：{view_state}
-本会话已有结果（最近 10 个）：{results}
-{skills}"""
+    @property
+    def by_name(self) -> dict[str, ToolSpec]:
+        return {s.name: s for s in self.specs}
+
+    @property
+    def intent(self) -> dict[str, Any] | None:
+        return self.matches[0].brief() if self.matches else None
 
 
 class AgentRuntime:
@@ -83,6 +92,7 @@ class AgentRuntime:
         llm: LLM,
         conversations: ConversationStore,
         send: Send,
+        intents: IntentLibrary | None = None,
     ):
         self.s = settings
         self.gw = gateway
@@ -90,6 +100,9 @@ class AgentRuntime:
         self.llm = llm
         self.conversations = conversations
         self.send = send
+        self.intents = intents if intents is not None else IntentLibrary(gateway.manifests.values())
+        self.prompts = PromptBuilder(settings, gateway, store)
+        self.executor = ToolExecutor(gateway)
         self.sessions: dict[str, Session] = {}
         self.closing = False  # 服务正在关闭：被取消的任务记为“中断”而不是“用户停止”
 
@@ -190,9 +203,12 @@ class AgentRuntime:
         )
         try:
             conv.history.append({"role": "user", "content": text})
-            await emit({"type": "run_started", "text": text, "planner": self.llm.label, "started_at": time.time()})
+            turn = self._plan_turn(conv, text)
+            await emit(
+                {"type": "run_started", "text": text, "planner": self.llm.label, "intent": turn.intent, "started_at": time.time()}
+            )
             await self.gw.ensure_loaded()
-            specs = self.gw.select(ctx.client_id, conv.user, text)
+            self._refresh_tools(ctx, turn)
             final_text, final_reasoning = "", ""
             while steps < self.s.max_steps:
                 steps += 1
@@ -203,8 +219,7 @@ class AgentRuntime:
                     (thinking if kind == "reasoning" else partial).append(piece)
                     await emit({"type": "reasoning_delta" if kind == "reasoning" else "text_delta", "delta": piece})
 
-                messages = [{"role": "system", "content": self._system_prompt(sess, specs)}] + self._trimmed(conv.history)
-                reply = await self.llm.complete(messages, [s.to_openai() for s in specs], on_delta=on_delta)
+                reply = await self.llm.complete(self._messages(sess, turn), [s.to_openai() for s in turn.specs], on_delta=on_delta)
                 reasoning = reply.get("reasoning") or "".join(thinking)
                 calls = reply.get("tool_calls") or []
                 content = (reply.get("content") or "").strip()
@@ -218,8 +233,7 @@ class AgentRuntime:
                 if content or reasoning:
                     await emit({"type": "thought", "text": content, "reasoning": reasoning})
                 partial.clear()
-                by_name = {s.name: s for s in specs}
-                for call, env in await self._execute(ctx, calls, by_name):
+                for call, env in await self.executor.run(ctx, calls, turn.by_name):
                     conv.history.append(
                         {
                             "role": "tool",
@@ -227,8 +241,7 @@ class AgentRuntime:
                             "content": json.dumps(for_model(env), ensure_ascii=False, default=str),
                         }
                     )
-                # 界面工具随页面开关而变化，每一步刷新可用工具
-                specs = self.gw.select(ctx.client_id, conv.user, text)
+                self._refresh_tools(ctx, turn)  # 界面工具随页面开关而变化，每一步刷新可用工具
             else:
                 final_text = f"已达到单次任务的最大步数（{self.s.max_steps}），请缩小问题范围或分步提问。"
                 conv.history.append({"role": "assistant", "content": final_text})
@@ -267,66 +280,6 @@ class AgentRuntime:
                 if sess.run_id == run_id:
                     sess.run_id = None
 
-    async def _execute(
-        self, ctx: CallContext, calls: list[dict[str, Any]], by_name: dict[str, ToolSpec]
-    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-        parsed = []
-        for call in calls:
-            fn = call.get("function") or {}
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-                if not isinstance(args, dict):
-                    raise ValueError("arguments 不是对象")
-                parsed.append((call, fn.get("name", ""), args, None))
-            except ValueError as e:
-                bad = error_envelope("INVALID_ARGS_JSON", f"参数不是合法 JSON：{e}", "重新生成合法的 JSON 参数")
-                parsed.append((call, fn.get("name", ""), {}, bad))
-
-        async def one(call: dict[str, Any], name: str, args: dict[str, Any], bad: dict[str, Any] | None):
-            spec = by_name.get(name)
-            info = self.gw.describe(spec) if spec else {
-                "title": name,
-                "system": name.partition("__")[0],
-                "system_title": self.gw.system_title(name.partition("__")[0]),
-                "color": self.gw.system_color(name.partition("__")[0]),
-                "kind": None,
-                "risk": None,
-            }
-            assert ctx.emit is not None
-            await ctx.emit({"type": "tool_call_started", "call_id": call["id"], "tool": name, "args": args, **info})
-            t0 = time.perf_counter()
-            try:
-                env = bad or await self.gw.call(ctx, name, args)
-            except asyncio.CancelledError:
-                await ctx.emit(
-                    {"type": "tool_call_finished", "call_id": call["id"], "tool": name, "ok": False,
-                     "error_code": "CANCELLED", "message": "已停止", "duration_ms": round((time.perf_counter() - t0) * 1000)}
-                )
-                raise
-            await ctx.emit(
-                {
-                    "type": "tool_call_finished",
-                    "call_id": call["id"],
-                    "tool": name,
-                    "duration_ms": round((time.perf_counter() - t0) * 1000),
-                    **{
-                        k: env.get(k)
-                        for k in (
-                            "ok", "summary", "error_code", "message", "fix_hint", "result_id", "result_type",
-                            "total", "preview", "fields", "changes", "columns", "confirm_token",
-                        )
-                        if env.get(k) is not None
-                    },
-                }
-            )
-            return call, env
-
-        # 全部是只读或只改界面的调用时并行执行，否则按顺序执行
-        safe = all(by_name.get(n) and by_name[n].risk in ("read", "view") for _, n, _, _ in parsed)
-        if safe and len(parsed) > 1:
-            return list(await asyncio.gather(*(one(*p) for p in parsed)))
-        return [await one(*p) for p in parsed]
-
     async def _ask_confirm(self, sess: Session, emit: Callable[[dict[str, Any]], Awaitable[None]], entry: PendingConfirm) -> bool:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         sess.waiters[entry.token] = fut
@@ -359,7 +312,31 @@ class AgentRuntime:
         await emit({"type": "confirm_resolved", "confirm_id": entry.token, "approved": approved})
         return approved
 
-    # ------------------------------------------------------------------ 上下文
+    # ------------------------------------------------------------------ 规划与上下文
+    def _plan_turn(self, conv: Conversation, text: str) -> Turn:
+        """识别意图并确定路由偏好。只做规则匹配，不调用模型；识别不到时 matches 为空，模型照常自由规划。"""
+        transcript = Transcript(conv.history)
+        today = datetime.now(self.s.tzinfo).date()
+        try:
+            matches = self.intents.classify(text, today=today, transcript=transcript)
+        except Exception:  # 识别只是参考：出错时让模型自由规划，不中断运行
+            log.exception("intent classification failed")
+            matches = []
+        prefer = set(transcript.recent_systems())
+        if matches:
+            prefer |= set(matches[0].intent.systems())
+        return Turn(text=text, matches=matches, prefer=prefer)
+
+    def _refresh_tools(self, ctx: CallContext, turn: Turn) -> None:
+        turn.specs = self.gw.select(ctx.client_id, ctx.user, turn.text, prefer=turn.prefer)
+
+    def _messages(self, sess: Session, turn: Turn) -> list[dict[str, Any]]:
+        hint = describe(self.intents, turn.matches, set(turn.by_name))
+        system = self.prompts.build(
+            session_id=sess.conv.id, client_id=sess.client_id, user=sess.conv.user, specs=turn.specs, intent_hint=hint
+        )
+        return [{"role": "system", "content": system}] + self._trimmed(sess.conv.history)
+
     @staticmethod
     def _trimmed(hist: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if len(hist) <= _HISTORY_LIMIT:
@@ -369,35 +346,3 @@ class AgentRuntime:
             if len(hist) - i <= _HISTORY_LIMIT:
                 return hist[i:]
         return hist[starts[-1]:] if starts else hist[-_HISTORY_LIMIT:]
-
-    def _system_prompt(self, sess: Session, specs: list[ToolSpec]) -> str:
-        now = datetime.now(self.s.tzinfo)  # 与规则模式同一个时区来源（AGENT_TZ）
-        ui_systems = sorted({s.system for s in specs if s.kind == "ui"})
-        ui = "、".join(
-            (self.gw.manifests[s].ui_bridge.title or self.gw.manifests[s].title) + f"（{s}）" for s in ui_systems
-        ) or "无（界面工具不可用，展示请用 canvas__show）"
-        views = self.gw.hub.view_states(sess.client_id, sess.conv.user)
-        results = [r.meta() for r in sorted(self.store.list_for_session(sess.conv.id), key=lambda r: r.created_at)[-10:]]
-        brief = [{k: r[k] for k in ("result_id", "result_type", "summary")} for r in results]
-        used = {s.system for s in specs}
-        skills = "\n\n".join(
-            f"## 系统知识：{m.title}（{m.system}）\n{_strip_frontmatter(m.skill_text)}"
-            for m in self.gw.manifests.values()
-            if m.system in used and m.skill_text
-        )
-        return SYSTEM_PROMPT.format(
-            app_name=self.s.app_name,
-            now=f"{now:%Y-%m-%d %H:%M}（{now:%A}，{self.s.timezone}，UTC{now:%z}）",
-            ui=ui,
-            view_state=json.dumps(views, ensure_ascii=False) if views else "无",
-            results=json.dumps(brief, ensure_ascii=False) if brief else "无",
-            skills=skills,
-        )
-
-
-def _strip_frontmatter(text: str) -> str:
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end != -1:
-            return text[end + 4 :].strip()
-    return text.strip()

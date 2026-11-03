@@ -12,15 +12,17 @@ Baton：通用 Agent 通过**能力网关**调度多个操作类 Web 系统。Ag
 web/ 工作台 (React + Ant Design X)      ← WS /ws/workbench、REST /api/*
    └─ iframe: 业务系统页面 + sdk/agent-bridge.js  ← WS /ws/bridge
 agent/ Agent 服务 (FastAPI :8000)
-   server.py  HTTP/WS 入口          runtime.py  编排循环、停止/重新生成、确认等待、事件推送
-   gateway.py 目录·校验·风险·confirm_token·审计     conversations.py 对话 JSON 与事件重放
-   providers/ openapi（API）· bridge（界面）· builtin（分组/画布/结果）
-   results.py 结果仓库(result_id)   audit.py 审计   llm.py / rule_planner.py 模型 / 规则规划
+   server.py  HTTP/WS 入口          runtime.py  编排循环（识别→选工具→模型→执行）、停止/重新生成、确认等待、事件推送
+   prompt.py  系统提示词            executor.py 工具调度（相邻只读调用并行、写操作单独执行）、执行过程事件
+   intents.py 场景剧本模型·意图识别·R11 校验   slots.py 槽位类型   playbook.py 剧本执行器（规则模式）·给模型的提示
+   transcript.py 消息历史解析       gateway.py 目录·校验·风险·confirm_token·重复失败拦截·审计
+   providers/ openapi（API）· bridge（界面）· builtin（分组/画布/结果）   conversations.py 对话 JSON 与事件重放
+   results.py 结果仓库(result_id)   audit.py 审计   llm.py / rule_planner.py 模型 / 规则模式（只调剧本，不写场景）
    manifest.py 清单模型与规则校验   check.py 接入检查命令   analytics.py 带人数上限的空间分组
-systems/  三个模拟业务系统 fleet:8101 · tms:8102 · dispatch:8103，各带 manifest.yaml + SKILL.md；样例数据在 _sample_data.py
+systems/  三个模拟业务系统 fleet:8101 · tms:8102 · dispatch:8103，各带 manifest.yaml + SKILL.md，fleet/dispatch 带 playbooks.yaml；样例数据在 _sample_data.py
 ```
 
-数据流要点：模型 → 运行时 → `Gateway.call()` → provider；工具结果入结果仓库，模型只拿 `result_id`、摘要和 ≤5 条预览。
+数据流要点：识别意图（规则匹配，不调模型）→ 模型（或规则模式按剧本）→ 运行时执行器 → `Gateway.call()` → provider；工具结果入结果仓库，模型只拿 `result_id`、摘要和 ≤5 条预览。场景剧本只是产出与模型相同的工具调用，不绕过网关和确认（ADR-0011）。
 
 ## 常用命令
 
@@ -35,7 +37,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 
 - 环境：Python ≥ 3.10；Node.js 20.19 / 22.12 及以上（只有改前端时需要）。
 - Windows 下 `python` 可能是 Store 占位符，用 `py -m pytest -q`、`py -m ruff check .`。
-- 未配置 `LLM_*` 即为规则模式（`rule_planner.py` 规则脚本，走同一条链路）。
+- 未配置 `LLM_*` 即为规则模式（`rule_planner.py` 按各系统 `playbooks.yaml` 执行，走同一条链路）。`GET /api/intents?text=…` 只识别不执行，调试剧本用。
 
 ## 不能破坏的约束
 
@@ -53,14 +55,18 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 
 | 任务 | 改哪里 |
 | --- | --- |
-| 接入新系统 | 新建 `systems/<name>/manifest.yaml`（+ `SKILL.md`、可选 `adapter_hooks.py`），按 INTEGRATION_RULES 第 9 节；用 `agent.check` 验证，补一条 `tests/test_scenarios.py` 风格的场景测试 |
+| 接入新系统 | 新建 `systems/<name>/manifest.yaml`（+ `SKILL.md`、可选 `adapter_hooks.py`、可选 `playbooks.yaml`），按 INTEGRATION_RULES 第 9 节；用 `agent.check` 验证，补一条 `tests/test_scenarios.py` 风格的场景测试 |
+| 新增 / 改场景（意图） | 对应系统的 `playbooks.yaml`（INTEGRATION_RULES 第 11 节），不要在 `rule_planner.py` / `playbook.py` 里写具体场景；`tests/test_intents.py` 补识别用例，必要时补场景测试 |
+| 新增槽位类型 | `agent/slots.py` 用 `@extractor` 注册 + INTEGRATION_RULES R11.5 的类型表 + `tests/test_intents.py` |
+| 改剧本规则 / 剧本字段 | `agent/intents.py`（校验提示带 R11.x）+ INTEGRATION_RULES 第 11 节 + `tests/test_intents.py` |
+| 改编排循环 / 工具调度 / 提示词 | `runtime.py`（运行与识别）、`executor.py`（并行分批）、`prompt.py`（系统提示词）；`tests/test_scenarios.py` 覆盖规则模式和 OpenAI 兼容接口两条路径 |
 | 改接入规则 / 清单字段 | `agent/manifest.py`（校验提示带规则编号）+ INTEGRATION_RULES 对应规则和第 10 节字段参考 + `tests/test_manifest.py` |
 | 新增能力来源 | `agent/providers/` 实现 `specs()` 与 `call()`，在 `gateway._dispatch` 按 `kind` 分发 |
 | 新增内置工具 | `providers/builtin_provider.py` |
 | 改桥接 SDK / 桥接协议 | `sdk/agent-bridge.js`（纯 JS，无需构建）+ `providers/bridge_provider.py`；参考实现是 `systems/fleet/static/map.html` 末尾；同步 ARCHITECTURE 3.4 与 INTEGRATION_RULES 第 5 节 |
 | 新增 / 改 REST 或 WS 接口 | `agent/server.py`；前端调用在 `web/src/api.ts`、`web/src/socket.ts`；同步 ARCHITECTURE 第 1 节和 3.5 节 |
 | 换模型接口 | `llm.py`，只需满足 `complete(messages, tools, on_delta=None)` |
-| 改样例数据或规则规划器 | `systems/_sample_data.py`、`agent/rule_planner.py`；README“验证清单”里的数字和 `tests/test_scenarios.py` 依赖它们，一并核对 |
+| 改样例数据或场景剧本 | `systems/_sample_data.py`、`systems/*/playbooks.yaml`；README“验证清单”里的数字和 `tests/test_scenarios.py` 依赖它们，一并核对 |
 | 新增配置项 | `agent/config.py` 的 `Settings` + `.env.example` + ARCHITECTURE 第 5 节 |
 | 工作台界面 | `web/src/components/`；视觉约定在 `web/src/theme.ts`（琥珀色只表示写操作/确认，系统标识色避开琥珀、绿、红）；改完重建 `web/dist` |
 | 发版 / 改版本号 | `agent/__init__.py` 的 `__version__`、`web/package.json` 与 `package-lock.json`、`sdk/agent-bridge.js` 头注释、README / ARCHITECTURE 标题；CHANGELOG 把“未发布”落成版本号和日期 |
@@ -83,7 +89,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 
 - [ ] `py -m pytest -q` 全部通过、`ruff check .` 无报错（任何 Python 改动）；
 - [ ] 改了 `web/src/` 或前端依赖：`npm run build`（含类型检查），把 `web/dist/` 一并提交；
-- [ ] 改了清单：系统启动后 `python -m agent.check <manifest> -v` 0 个错误；
+- [ ] 改了清单或场景剧本：系统启动后 `python -m agent.check <manifest> -v` 0 个错误、无意料外的提醒；
 - [ ] 改了协议、信封、清单字段、配置项：对应 docs 章节已同步（见下一节）；
 - [ ] 改了约束或做了架构取舍：已有 ADR；
 - [ ] 用户、接入方或协议能感知到的变化：CHANGELOG“未发布”已记一条。
@@ -98,7 +104,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 | 用户 / 接入方 / 协议可感知的新增、变更、修复、移除 | [CHANGELOG.md](CHANGELOG.md) 的“未发布” |
 | 新增、放宽或替换约束；引入依赖、存储、协议；方案取舍 | `docs/adr/` 新增一篇（[模板](docs/adr/template.md)），更新 ADR 索引 |
 | 组件、请求链路、事件协议、配置项 | ARCHITECTURE 对应章节（配置是第 5 节，事件是 3.5 节） |
-| 接入规则、清单字段 | INTEGRATION_RULES |
+| 接入规则、清单字段、剧本字段 | INTEGRATION_RULES |
 | 启动方式、验证清单、版本边界 | README |
 | Agent 的工作约定本身 | 本文件 |
 

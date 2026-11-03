@@ -21,6 +21,7 @@ from pydantic import (
 )
 
 from .contracts import LOCAL_TOOL_RE, SYSTEM_RE, TOOL_NAME_RE
+from .intents import IntentSpec, PlaybookFile, validate_library
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z0-9_]+)(?::-([^}]*))?\}")
 
@@ -127,9 +128,11 @@ class Manifest(_Strict):
     api: ApiSection | None = None
     ui_bridge: UiBridgeSection = Field(default_factory=UiBridgeSection)
     skill: str | None = None  # 知识包 SKILL.md 路径（相对清单）
+    playbooks: str | None = None  # 场景剧本 playbooks.yaml 路径（相对清单），见 INTEGRATION_RULES 第 11 节
 
     path: Path | None = Field(default=None, exclude=True)
     skill_text: str = Field(default="", exclude=True)
+    intents: list[IntentSpec] = Field(default_factory=list, exclude=True)
 
     @field_validator("system")
     @classmethod
@@ -211,22 +214,39 @@ class ManifestError(Exception):
     pass
 
 
+def _errors(e: ValidationError) -> str:
+    msgs = []
+    for err in e.errors():
+        loc = ".".join(str(x) for x in err["loc"])
+        msgs.append(f"{loc}: {err['msg']}" if loc else err["msg"])
+    return "；".join(msgs)
+
+
 def load_manifest(path: str | Path) -> Manifest:
     path = Path(path)
     raw = yaml.safe_load(expand_env(path.read_text(encoding="utf-8"))) or {}
     try:
         m = Manifest.model_validate(raw)
     except ValidationError as e:
-        msgs = []
-        for err in e.errors():
-            loc = ".".join(str(x) for x in err["loc"])
-            msgs.append(f"{loc}: {err['msg']}" if loc else err["msg"])
-        raise ManifestError(f"{path}: " + "；".join(msgs)) from None
+        raise ManifestError(f"{path}: " + _errors(e)) from None
     m.path = path
     if m.skill:
         skill_path = (path.parent / m.skill).resolve()
         if skill_path.exists():
             m.skill_text = skill_path.read_text(encoding="utf-8")
+    if m.playbooks:
+        pb_path = (path.parent / m.playbooks).resolve()
+        if not pb_path.exists():
+            raise ManifestError(f"{path}: playbooks 指向的文件不存在：{m.playbooks}（R11.1）")
+        try:
+            m.intents = PlaybookFile.model_validate(yaml.safe_load(pb_path.read_text(encoding="utf-8")) or {}).intents
+        except ValidationError as e:
+            raise ManifestError(f"{pb_path}: " + _errors(e)) from None
+        except yaml.YAMLError as e:
+            raise ManifestError(f"{pb_path}: YAML 格式错误：{e}") from None
+        problems = validate_library([m])  # 只看本系统能查的部分；跨系统的在 load_manifests 里再查一次
+        if problems:
+            raise ManifestError(f"{pb_path}: " + "；".join(problems))
     return m
 
 
@@ -242,6 +262,8 @@ def load_manifests(pattern: str) -> list[Manifest]:
     dup = {s for s in systems if systems.count(s) > 1}
     if dup:
         errors.append(f"system 重复：{', '.join(sorted(dup))}")
+    if not errors:
+        errors += validate_library(manifests)
     if errors:
         raise ManifestError("\n".join(errors))
     return manifests
