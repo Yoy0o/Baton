@@ -32,6 +32,16 @@ export interface BridgeConn {
 
 export type Bridges = Record<string, BridgeConn[]>;
 
+/** 常用任务：来自各系统场景剧本中可单独发起的意图（GET /api/config 的 presets）。 */
+export interface TaskPresetInfo {
+  id: string;
+  title: string;
+  description: string;
+  prompt: string;
+  icon: string | null;
+  systems: string[];
+}
+
 export interface AppConfig {
   app: { name: string; tagline: string; version: string };
   version: string;
@@ -40,6 +50,7 @@ export interface AppConfig {
   agent_url: string;
   systems: SystemInfo[];
   systems_meta: Record<string, SystemMeta>;
+  presets?: TaskPresetInfo[];
   load_errors: Record<string, string[]>;
   bridges: Bridges;
 }

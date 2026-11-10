@@ -19,6 +19,8 @@ SYSTEM_RE = re.compile(r"^[a-z][a-z0-9]{1,19}$")
 LOCAL_TOOL_RE = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
 
 PREVIEW_ROWS = 5  # 返回给模型的预览行数上限
+# 平台内置工具所属的“系统”（不来自接入清单）
+BUILTIN_SYSTEMS = {"analytics": "内置计算", "canvas": "工作台画布", "results": "结果仓库"}
 RISK_LABELS = {"read": "只读", "view": "只改界面", "write": "写入，需确认", "critical": "高风险，需确认"}
 
 

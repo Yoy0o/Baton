@@ -1,8 +1,8 @@
 # 系统接入规则 v1
 
-适用版本：Baton v0.2（v0.1 时名为 Agent Hub，规则本身未变，v0.2 只补充了 R5.5–R5.7 和清单的 `color`、界面工具 `title` 两个可选字段）。规则编号（R1.1 等）与代码中的校验提示一一对应；标注 **[校验]** 的规则由 `agent/manifest.py`、网关或 `python -m agent.check` 自动检查，违反时拒绝加载或拒绝注册。
+适用版本：Baton v0.2（v0.1 时名为 Agent Hub，规则本身未变，v0.2 只补充了 R5.5–R5.7 和清单的 `color`、界面工具 `title` 两个可选字段；未发布版本新增第 11 节场景剧本与清单的 `playbooks` 字段）。规则编号（R1.1 等）与代码中的校验提示一一对应；标注 **[校验]** 的规则由 `agent/manifest.py`、网关或 `python -m agent.check` 自动检查，违反时拒绝加载或拒绝注册。
 
-一句话：**一个系统 = 一份接入清单（manifest.yaml）+ 可选的知识包（SKILL.md）+ 可选的格式钩子（adapter_hooks.py）**。系统后端不改代码；需要界面能力时，前端加一个 SDK 和几个处理函数。
+一句话：**一个系统 = 一份接入清单（manifest.yaml）+ 可选的知识包（SKILL.md）+ 可选的格式钩子（adapter_hooks.py）+ 可选的场景剧本（playbooks.yaml）**。系统后端不改代码；需要界面能力时，前端加一个 SDK 和几个处理函数。
 
 ---
 
@@ -97,8 +97,9 @@
 5. 格式对不上：写 `adapter_hooks.py` 并在清单 `hooks` 中引用。
 6. 需要界面能力：页面引入 SDK，注册工具（参考 `systems/fleet/static/map.html` 末尾），清单 `ui_bridge` 中声明白名单和 `embed_url`，并放开 iframe 嵌入。
 7. 写 `SKILL.md`。
-8. 启动系统后运行 `python -m agent.check systems/<system>/manifest.yaml -v`，应为 0 个错误；再在工作区“工具”页签确认工具和描述。
-9. 在工作台用 3–5 句真实提问试跑，在工作区“审计”页签核对每次调用。
+8. 可选：为常见任务写场景剧本 `playbooks.yaml`（第 11 节），清单里加 `playbooks: playbooks.yaml`。用 `GET /api/intents?text=<一句提问>` 检查能否识别、参数取得对不对。
+9. 启动系统后运行 `python -m agent.check systems/<system>/manifest.yaml -v`，应为 0 个错误；再在工作区“工具”页签确认工具和描述。
+10. 在工作台用 3–5 句真实提问试跑（有剧本的场景在规则模式和模型模式各跑一遍），在工作区“审计”页签核对每次调用。
 
 ## 10. 清单字段参考
 
@@ -151,4 +152,80 @@ ui_bridge:
     - {tool: show_result_layer, risk: view, title: 叠加结果图层}
 
 skill: SKILL.md                     # R6.2 知识包，相对清单路径
+playbooks: playbooks.yaml           # 可选：场景剧本，相对清单路径（第 11 节）
+```
+
+## 11. 场景剧本（可选）
+
+场景剧本把“用户常说的一类任务”写成声明式的步骤，同一份剧本有三种用途（ADR-0011）：
+
+| 用途 | 效果 |
+| --- | --- |
+| 规则模式（未配置模型） | 按剧本识别并执行，不需要为新场景写 Python |
+| 模型模式 | 识别结果、已取出的参数和建议步骤写进系统提示词（标明“仅供参考”），模型仍可自行决定 |
+| 工具路由 | 工具多时，识别出的意图引用的系统一定会被加载；追问时上一轮用过的系统也会保留 |
+
+另外，可单独发起的意图（没有 `requires.result`）会作为工作台“常用任务”，规则模式的帮助文本也由剧本自动生成。
+
+- **R11.1 [校验]** 剧本文件由清单 `playbooks` 指向（相对清单路径），文件必须存在。意图 `id` 为小写字母开头的 snake_case，全平台唯一。跨系统的场景放在“产出最终结果 / 被写入”的那个系统目录下；引用的系统未接入时，该意图只是不可用（不参与识别），`agent.check` 会提醒。
+- **R11.2 [校验]** `match` 至少声明 `any`、`all`、`slots` 之一：`none` 命中任何一个即排除，`all` 须全部命中，`any` 至少命中一个，`slots` 中的槽位须从原话里取到值（这些槽位不能有 `default`）。以 `re:` 开头的词按正则匹配，须能编译。至少一个 `examples`，第一个示例用于帮助文本和常用任务。
+- **R11.3 [校验]** 步骤须且只能是 `call`（调用工具）、`show`（展示结果）、`write`（写操作）之一；步骤 id、槽位名、`requires.result` 名不能重名。引用的工具名须符合 R1.2，且（系统已接入时）在对应清单的 `api.expose` 或 `ui_bridge.tools` 中声明、或是平台内置工具。`requires` 每项须且只能是 `tool`、`result`（须带 `type`）、`slot` 之一。
+- **R11.4 [校验]** 模板里引用的名字必须已定义：槽位、步骤 id、`requires.result` 的名字，以及全局可用的 `examples`、`help`、`today`、`intent`；`on_error` 里还可用 `{error}`，`write.lines` 里还可用 `{target}`、`{summary}`、`{error}`、`{state}`。`when` 引用槽位或步骤 id；`suggestions.by` 须是 `write` 步骤。引用其他意图的示例 `{examples.<id>}` 时，该意图不存在或不可用则显示为空（`agent.check` 提醒）。
+- **R11.5 [校验]** 槽位类型须是已注册的类型，参数须是该类型认识的参数。内置类型：
+
+  | 类型 | 参数 | 取值 |
+  | --- | --- | --- |
+  | `choice` | `options: {取值: [触发词…]}` | 按声明顺序第一个命中的取值 |
+  | `flag` | `any: [触发词…]` | 命中为 true，否则 false |
+  | `date` | — | ISO 日期，或“今天 / 明天 / 后天 / 昨天”（按 `AGENT_TZ`），都没有时为今天 |
+  | `number` | `before`、`unit`、`loose`、`decimal` | “不超过 8 人”这类数字，支持一到十的汉字 |
+  | `duration` | `unit`（`min` / `h`）、`before`、`after` | “过去 24 小时”“2 小时以上”换算成指定单位 |
+  | `pattern` | `pattern`、`group`、`all` | 正则提取，如司机 ID `D\d{4}` |
+  | `assignments` | `id`、`verbs`、`unit`、`key` | “把 D0012 换到第 3 组” → `[{"id": "D0012", "group": 3}]` |
+
+  所有类型都可用 `default`（取不到时的值）、`description`（写给模型的说明）、`from_call: <工具全名>.<参数名>`（先沿用本对话里该工具最近一次调用的参数，适合追问）。新的参数形态在 `agent/slots.py` 用 `@extractor("类型名", {参数…})` 注册。
+- **R11.6 [校验]** 剧本不能绕过两段式写入（第 3 节）：`call` 步骤不得调用 `risk: write|critical` 的工具，也不能传 `confirm_token`；写操作只能用 `write` 步骤，`preview` 与 `apply` 属于同一系统，且清单里 `preview` 工具声明了 `pairs_with` 指向 `apply`；`write.args` 只传给 `preview`，不能包含 `confirm_token`。用户确认仍由运行时强制，规则模式里同样会弹出确认卡片。
+- **R11.7** 剧本只描述“常见说法 → 常用步骤”，不要试图覆盖所有问法：模型模式下它只是提示，识别不到时模型照常自由规划。触发词宁少勿滥，相互重叠的意图用 `priority` 明确先后（同优先级按命中项数，再按声明顺序）。
+
+模板语法：`{名字.路径}` 取值（如 `{plan.result_id}`、`{base.data.params.groups}`）；`{a|b|5}` 依次取第一个有值的备选，不是名字的备选按字面量（数字转为数字）。工具参数整段就是一个占位符时保留原类型（数字、列表），值为空的参数不传。步骤结果可引用的字段：`call` 步骤为工具返回的信封字段（`result_id`、`summary`、`total`、`data`…）加 `error`；`show` 步骤为 `where`（展示到了哪里）；`write` 步骤为 `state`（`skipped` / `preview_failed` / `not_applied` / `applied` / `rejected` / `failed`）、`line`（该状态的一句说明，可用 `lines` 覆盖默认文案）、`summary`、`error`。
+
+```yaml
+# systems/<system>/playbooks.yaml
+version: 1
+intents:
+  - id: regroup                       # R11.1
+    title: 重组司机组
+    icon: team                        # 可选：常用任务图标（team / environment / node-index / car / swap / sync）
+    description: 按当前位置把排班司机分组，确认后写回调度系统
+    examples: [把华东区明天早班的司机分成 5 组，每组不超过 8 人，确认后同步到调度系统]
+    priority: 90                      # 越大越优先
+    match: {any: [分组, 重组, 分成]}   # R11.2
+    slots:                            # R11.5
+      region: {type: choice, options: {north-china: [华北, 北京]}, default: east-china}
+      date: {type: date}
+      groups: {type: number, before: [分成], unit: [组], loose: true, default: 5}
+      sync: {type: flag, any: [同步, 写回]}
+    requires:                         # 可选：前置条件，不满足时答复 message
+      - tool: fleet__show_result_layer
+        message: 请先打开车队地图
+    steps:                            # R11.3
+      - id: roster
+        call: tms__search_shift_drivers
+        args: {region: "{region}", date: "{date}", shift: early}
+        on_error: 查询排班名单失败：{error}
+      - id: plan
+        call: analytics__run_grouping
+        args: {points: "{roster.result_id}", groups: "{groups}"}
+      - id: show
+        show: {result: plan, color_by: group, title: 分组方案, ui: [fleet__show_result_layer], canvas: fallback}
+      - id: writeback                 # R11.6
+        when: sync
+        write: {preview: dispatch__preview_regroup, apply: dispatch__apply_regroup, args: {groups: "{plan.result_id}"}}
+    answer: |-                        # R11.4
+      {plan.summary}，已在{show.where}展示。
+      - {writeback.line}
+    suggestions:
+      by: writeback
+      cases: {applied: ["{examples.stops}"]}
+      default: [同步到调度系统]
 ```

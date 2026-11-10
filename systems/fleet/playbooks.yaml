@@ -1,0 +1,83 @@
+# 场景剧本：车队追踪地图台（挂车停留、轨迹回放、定位司机）
+# 字段与规则见 docs/INTEGRATION_RULES.md 第 11 节。
+version: 1
+
+intents:
+  - id: stops
+    title: 挂车停留地图
+    icon: environment
+    description: 过去一段时间停留超时的挂车，按客户统计并在车队地图上着色
+    examples:
+      - 在地图上显示过去 24 小时停留超过 2 小时的挂车，按客户着色
+    priority: 70
+    match:
+      any: [停留, 挂车]
+    slots:
+      lookback_h: {type: duration, unit: h, before: [过去, 最近, 近], default: 24, description: 回看多少小时}
+      min_duration_min: {type: duration, unit: min, before: [超过, 大于, 多于], after: [以上], default: 120, description: 停留时长下限（分钟）}
+    steps:
+      - id: stops
+        call: fleet__search_stops
+        args: {lookback_h: "{lookback_h}", min_duration_min: "{min_duration_min}"}
+        on_error: 查询停留记录失败：{error}
+      - id: stats
+        call: results__stats
+        args: {result_id: "{stops.result_id}", group_by: customer, value_field: duration_min}
+        optional: true
+      - id: show
+        show: {result: stops, color_by: customer, title: "停留超过 {min_duration_min} 分钟的挂车", ui: [fleet__show_result_layer]}
+    answer: |-
+      过去 {lookback_h} 小时停留超过 {min_duration_min} 分钟的挂车：{stops.summary}。
+
+      - 分布：{stats.summary}
+      - 展示：已在{show.where}按客户着色，结果 `{stops.result_id}`。
+    suggestions: ["{examples.track}", 把华东区明天早班的司机分成 5 组，每组不超过 8 人]
+
+  - id: track
+    title: 轨迹回放
+    icon: node-index
+    description: 调用车队地图台自带的回放功能，播放某位司机某天的轨迹
+    examples:
+      - 回放司机 D0012 今天的轨迹
+    priority: 60
+    match:
+      any: [轨迹, 回放]
+    slots:
+      driver: &driver {type: pattern, pattern: "D\\d{4}", description: 司机 ID}
+      date: {type: date, description: 日期}
+    requires:
+      - tool: fleet__play_track
+        message: 车队地图未打开。轨迹回放是车队地图台自带的界面功能，请先在右侧工作区打开“车队地图”，状态显示已接入后再试。
+      - slot: driver
+        message: 要回放哪位司机的轨迹？请带上司机 ID，例如：{examples.track}
+        suggestions: ["{examples.track}"]
+    steps:
+      - id: track
+        call: fleet__play_track
+        args: {driver_id: "{driver}", date: "{date}"}
+        on_error: 回放失败：{error}
+    answer: "{track.summary}"
+    suggestions: ["在地图上定位 {driver}", "{examples.stops}"]
+
+  - id: locate
+    title: 定位司机
+    icon: car
+    description: 在车队地图上定位并选中某位司机
+    examples:
+      - 在地图上定位 D0012
+    priority: 50
+    match:
+      slots: [driver]
+      any: [定位, 在哪, 位置]
+    slots:
+      driver: *driver
+    requires:
+      - tool: fleet__focus_driver
+        message: 车队地图未打开，无法定位。请先在右侧工作区打开“车队地图”。
+    steps:
+      - id: locate
+        call: fleet__focus_driver
+        args: {driver_id: "{driver}"}
+        on_error: 定位失败：{error}
+    answer: "{locate.summary}"
+    suggestions: ["回放司机 {driver} 今天的轨迹"]

@@ -3,14 +3,17 @@
 负责：工具目录（命名空间）、按需选择、参数校验、风险策略（写操作必须预览 + 用户确认）、
 确认令牌签发与回放、审计。任何异常都转成可纠正的错误信封返回给模型，不向上抛。
 用户停止任务时：未确认的写操作不会执行；已经确认、正在提交的写操作会完成并记入审计。
+同一次运行里，原样重复一个已经失败（且不可重试）的调用会被直接拒绝（REPEATED_CALL），避免模型空转。
 """
 from __future__ import annotations
 
 import asyncio
 import difflib
+import json
 import logging
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,7 +22,7 @@ from jsonschema import Draft202012Validator
 
 from .audit import AuditLog
 from .config import Settings
-from .contracts import ToolError, ToolSpec, error_envelope, ok_envelope
+from .contracts import BUILTIN_SYSTEMS, ToolError, ToolSpec, error_envelope, ok_envelope
 from .manifest import Manifest
 from .providers import CallContext, CallOutcome
 from .providers.bridge_provider import BridgeHub
@@ -31,9 +34,9 @@ log = logging.getLogger("agent.gateway")
 
 CONFIRM_TTL_S = 600  # confirm_token 有效期（R3.2）
 _RELOAD_INTERVAL_S = 5
+# 不记为“失败过”的错误：停止任务不是调用本身的问题；界面未打开可能在运行中变化（用户打开了页面）
+_UNTRACKED_FAILURES = {"CANCELLED", "REPEATED_CALL", "UI_NOT_CONNECTED"}
 
-# 内置工具所属的“平台”系统
-BUILTIN_SYSTEMS = {"analytics": "内置计算", "canvas": "工作台画布", "results": "结果仓库"}
 PLATFORM_COLOR = "#64748B"
 # 清单未声明 color 时按顺序分配的系统标识色（避开表示写操作的琥珀色、成功绿、错误红）
 LINE_COLORS = ["#2563EB", "#7C3AED", "#C026D3", "#0891B2", "#4F46E5", "#0D9488", "#9333EA", "#1D4ED8"]
@@ -126,12 +129,17 @@ class Gateway:
         specs += self.builtin.specs()
         return specs
 
-    def select(self, client_id: str, user: str, text: str) -> list[ToolSpec]:
-        """工具少时全量加载；多时按清单 keywords 路由，只加载相关系统 + 内置工具（设计文档 4.8）。"""
+    def select(self, client_id: str, user: str, text: str, prefer: Iterable[str] = ()) -> list[ToolSpec]:
+        """工具少时全量加载；多时只加载相关系统 + 内置工具（设计文档 4.8）。
+
+        相关系统 = 清单 keywords 命中的系统 ∪ prefer（运行时给出：识别出的意图引用的系统、上一轮用过的系统，
+        保证“同步到调度系统”这类追问不会因为没提到关键词而丢掉上一步的工具）。都没有时全量加载。
+        """
         specs = self.catalog(client_id, user)
         if len(specs) <= self.settings.full_catalog_limit:
             return specs
         hit = {s for s, m in self.manifests.items() if any(k and k in text for k in m.keywords)}
+        hit |= {s for s in prefer if s in self.manifests}
         if not hit:
             return specs
         return [s for s in specs if s.kind == "builtin" or s.system in hit]
@@ -146,7 +154,15 @@ class Gateway:
         args = args or {}
         spec: ToolSpec | None = None
         envelope: dict[str, Any] | None = None
+        key = _call_key(name, args)
         try:
+            previous = ctx.failures.get(key)
+            if previous is not None:
+                raise ToolError(
+                    "REPEATED_CALL",
+                    f"本次任务中同样的调用已经失败过：{previous.get('message') or previous.get('error_code')}",
+                    "不要原样重试：按上次的 fix_hint 修改参数、换用其他工具，或如实告诉用户",
+                )
             await self.ensure_loaded()
             spec = self.find(name, ctx.client_id, ctx.user)
             if spec is None:
@@ -169,6 +185,8 @@ class Gateway:
             envelope = error_envelope("INTERNAL_ERROR", f"{type(e).__name__}: {e}"[:300], "稍后重试，或换一种方式完成任务", True)
         finally:
             self._audit(ctx, name, spec, args, envelope or error_envelope("CANCELLED", "任务已停止"), started)
+        if not envelope.get("ok") and not envelope.get("retryable") and envelope.get("error_code") not in _UNTRACKED_FAILURES:
+            ctx.failures[key] = {"error_code": envelope.get("error_code"), "message": envelope.get("message")}
         return envelope
 
     def _audit(
@@ -333,3 +351,10 @@ class Gateway:
         else:
             envelope = task.result()
         self._audit(ctx, spec.name, spec, {"confirm_token": entry.token}, envelope, started, note="（任务停止后完成）")
+
+
+def _call_key(name: str, args: dict[str, Any] | None) -> str:
+    try:
+        return name + json.dumps(args or {}, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return name + repr(args)

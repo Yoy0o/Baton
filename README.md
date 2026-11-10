@@ -26,7 +26,7 @@ python run.py
 
 浏览器打开 <http://localhost:8000>。右侧工作区“车队地图”页签上的圆点变成实心，说明地图页面已接入，可以开始。
 
-**规则模式**：没有配置模型时，Agent 用内置规则脚本代替模型规划，只认识下面几类指令，但走的是与真实模型完全相同的链路，答复也按字逐段推送。
+**规则模式**：没有配置模型时，Agent 按各系统的场景剧本（`playbooks.yaml`）识别意图并执行，代替模型规划，只认识剧本里声明的几类指令（下面验证清单里的都在），但走的是与真实模型完全相同的链路，答复也按字逐段推送。接入模型后，识别结果作为参考写进系统提示词，模型仍可自由规划。
 **接入真实模型**：复制 `.env.example` 为 `.env`，填写任意 OpenAI 兼容接口（需支持 tools / function calling，如通义千问、DeepSeek、智谱、Kimi、vLLM、Ollama 或 OpenAI），重启后可自由提问。默认使用流式输出，模型返回的思考过程（`reasoning_content`）会显示在答复上方，可展开。
 
 ```bash
@@ -72,7 +72,8 @@ LLM_API_KEY=sk-...
 
 ```bash
 python -m agent.check            # 校验接入清单、读取各系统 OpenAPI、列出将生成的工具（需系统已启动）
-pip install -r requirements-dev.txt && python -m pytest -q   # 40 个测试，覆盖规则、网关、场景、协议、会话
+pip install -r requirements-dev.txt && python -m pytest -q   # 覆盖接入规则、剧本与意图识别、网关、场景、协议、会话
+curl -s -G localhost:8000/api/intents --data-urlencode "text=把北京晚班的司机分成 4 组"   # 只识别不执行：命中的场景、取出的参数
 cd web && npm run typecheck      # 工作台类型检查
 curl -s -X POST localhost:8000/mcp -H 'content-type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'     # 以 MCP 形式查看工具目录
@@ -84,21 +85,24 @@ curl -s -X POST localhost:8103/api/_reset                    # 恢复调度系�
 ```
 agent/                Agent 服务
   server.py             HTTP / WebSocket 入口；main.py 为 uvicorn 入口
-  runtime.py            编排循环、停止与重新生成、确认等待、事件推送
+  runtime.py            编排循环（识别意图 → 选工具 → 调模型 → 执行）、停止与重新生成、确认等待、事件推送
+  prompt.py / executor.py   系统提示词 / 工具调度（相邻只读调用并行、写操作单独执行）
+  intents.py / slots.py     场景剧本模型、意图识别、剧本校验 / 槽位类型
+  playbook.py / transcript.py   剧本执行器（规则模式）与给模型的提示 / 消息历史解析
   conversations.py      对话保存与重放（data/conversations/）
-  gateway.py            能力网关：目录、校验、风险策略、confirm_token、审计
+  gateway.py            能力网关：目录、路由、校验、风险策略、confirm_token、重复失败拦截、审计
   providers/            三类能力来源：openapi_provider / bridge_provider / builtin_provider
   results.py            结果仓库与格式转换
   analytics.py          带人数上限的空间分组算法
   manifest.py           接入清单模型与规则校验
-  llm.py / rule_planner.py   OpenAI 兼容模型接入（流式）/ 规则模式
+  llm.py / rule_planner.py   OpenAI 兼容模型接入（流式）/ 规则模式（按剧本执行）
   check.py              接入检查命令
 web/                  工作台前端（React + Ant Design X + Vite），构建产物在 web/dist
   src/App.tsx           布局、会话、实时事件
   src/store.ts          由事件重放得到对话视图（实时与历史同一套逻辑）
   src/components/       对话、执行过程、确认卡片、工作区各页签
 sdk/agent-bridge.js   前端桥接 SDK（接口对齐 WebMCP）
-systems/              三个模拟业务系统，各带 manifest.yaml、SKILL.md
+systems/              三个模拟业务系统，各带 manifest.yaml、SKILL.md；fleet、dispatch 带场景剧本 playbooks.yaml
   fleet/                车队追踪地图台：REST API + 地图页面（页面末尾是接入代码）
   tms/                  排班系统：REST API
   dispatch/             调度系统：REST API（预览 / 提交），adapter_hooks.py 格式映射示例
@@ -113,7 +117,8 @@ docs/                 架构说明、接入规则
 1. 确认系统有 OpenAPI 文档，要暴露的接口有 `operationId`；
 2. 参照 `systems/fleet/manifest.yaml` 新建 `systems/<名称>/manifest.yaml`，列出白名单、重写描述、标风险，可选 `color` 指定系统标识色；
 3. 有写操作时提供预览 / 提交成对接口；需要界面能力时参照 `map.html` 末尾引入 SDK；
-4. 运行 `python -m agent.check systems/<名称>/manifest.yaml -v`，再到工作台试跑。
+4. 可选：参照 `systems/fleet/playbooks.yaml` 为常见任务写场景剧本，规则模式就能执行它，模型模式会参考它，工作台常用任务里也会出现；
+5. 运行 `python -m agent.check systems/<名称>/manifest.yaml -v`，用 `/api/intents?text=…` 检查识别，再到工作台试跑。
 
 完整规则与字段说明见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)。
 
@@ -123,7 +128,7 @@ docs/                 架构说明、接入规则
 - 对话保存在 `data/conversations/`（每个对话一个 JSON 文件）；确认令牌在进程内存中，服务重启后待确认的写操作作废（如实显示为中断）；结果保存 24 小时。
 - 不支持编辑已发送的消息、分支对话、附件上传；“重新生成”只针对最后一条回复。
 - 界面工具只支持内嵌在工作台中的页面（内嵌模式），只能是只改界面或只读。
-- 工具超过 30 个时只做关键词路由，没有向量检索；没有程序化工具调用、长任务、子 Agent、MCP Apps、自动化兜底。
+- 工具超过 30 个时按关键词、识别出的意图、上一轮用过的系统路由，没有向量检索；没有程序化工具调用、长任务、子 Agent、MCP Apps、自动化兜底。
 - `/mcp` 只实现 `initialize`、`tools/list`、`tools/call`，用于调试。
 - 分组算法为纯 Python，适合 2000 个点以内；结果页的点位预览为轻量示意图，完整地图交互在业务系统页面里。
-- 规则模式只识别上表几类指令。
+- 规则模式只识别场景剧本里声明的指令（规则匹配，不理解同义改写）；意图识别对模型模式只是提示。

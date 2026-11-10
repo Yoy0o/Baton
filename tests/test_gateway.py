@@ -5,6 +5,8 @@ import asyncio
 
 import pytest
 
+from agent.contracts import ToolSpec
+from agent.executor import batches, parse_calls
 from agent.providers import CallContext
 from agent.server import Platform
 
@@ -137,6 +139,59 @@ def test_write_without_ui_channel_is_refused(settings, transport):
         await p.http.aclose()
 
     run(body())
+
+
+def test_repeated_failure_is_refused_within_a_run(settings, transport):
+    """同一次运行里原样重复一个失败的调用：网关直接拒绝（REPEATED_CALL）并记审计，改了参数或换了运行不受影响。"""
+
+    async def body():
+        p = await _platform(settings, transport)
+        ctx = CallContext(user="local", session_id="s1", run_id="r1")
+        first = await p.gateway.call(ctx, "fleet__search_drivers", {"region": "huadong"})
+        assert first["error_code"] == "HTTP_400"
+        again = await p.gateway.call(ctx, "fleet__search_drivers", {"region": "huadong"})
+        assert again["error_code"] == "REPEATED_CALL" and "east-china" in again["message"] and again["fix_hint"]
+        assert (await p.gateway.call(ctx, "fleet__search_drivers", {"region": "east-china"}))["ok"]
+        fresh = CallContext(user="local", session_id="s1", run_id="r2")
+        assert (await p.gateway.call(fresh, "fleet__search_drivers", {"region": "huadong"}))["error_code"] == "HTTP_400"
+        codes = [e["error_code"] for e in p.audit.tail() if e["tool"] == "fleet__search_drivers"]
+        assert codes.count("REPEATED_CALL") == 1 and codes.count("HTTP_400") == 2
+        await p.http.aclose()
+
+    run(body())
+
+
+def test_select_routes_by_keywords_and_preferred_systems(settings, transport):
+    """工具多时只加载相关系统：关键词命中的系统 + 运行时给出的偏好（识别出的意图、上一轮用过的系统）。"""
+
+    async def body():
+        p = await _platform(settings, transport)
+        settings.full_catalog_limit = 5
+        everything = p.gateway.catalog("s1", "local")
+        assert p.gateway.select("s1", "local", "你好") == everything  # 什么都没命中时全量加载
+        follow_up = {s.system for s in p.gateway.select("s1", "local", "就按这个来", prefer={"dispatch", "canvas"})}
+        assert follow_up == {"dispatch", "analytics", "canvas", "results"}
+        mixed = {s.system for s in p.gateway.select("s1", "local", "看看明天的排班", prefer={"dispatch"})}
+        assert mixed == {"tms", "dispatch", "analytics", "canvas", "results"}
+        await p.http.aclose()
+
+    run(body())
+
+
+def test_executor_batches_reads_and_isolates_writes():
+    """相邻的只读 / 只改界面调用并行；写操作、未知工具、参数有误的调用各自单独执行，顺序不变。"""
+    risks = {"a__r1": "read", "a__r2": "read", "a__w": "write", "b__v1": "view", "b__v2": "view"}
+    specs = {n: ToolSpec(name=n, system=n[0], kind="api", description="样例工具", risk=r) for n, r in risks.items()}
+    names = ["a__r1", "a__r2", "a__w", "b__v1", "b__v2", "zz__unknown", "a__r1"]
+    calls = [{"id": str(i), "function": {"name": n, "arguments": "{}"}} for i, n in enumerate(names)]
+    calls += [
+        {"id": "bad", "function": {"name": "a__r2", "arguments": "{oops"}},
+        {"id": "null", "function": {"name": "b__v1", "arguments": "null"}},
+    ]
+    planned = parse_calls(calls)
+    assert planned[-2].error["error_code"] == "INVALID_ARGS_JSON" and planned[-1].args == {}
+    groups = [[p.name for p in b] for b in batches(planned, specs)]
+    assert groups == [["a__r1", "a__r2"], ["a__w"], ["b__v1", "b__v2"], ["zz__unknown"], ["a__r1"], ["a__r2"], ["b__v1"]]
 
 
 async def _plan(p: Platform, ctx: CallContext) -> str:

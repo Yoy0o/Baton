@@ -24,6 +24,8 @@ class CallContext:
     emit: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     # 请求用户确认写操作，返回是否批准；无工作台时为 None（写操作将被拒绝）
     confirm: Callable[[Any], Awaitable[bool]] | None = None
+    # 本次运行里失败过的调用（工具名 + 参数 → 错误），网关据此拒绝原样重试；运行时每次运行新建一个上下文
+    failures: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass

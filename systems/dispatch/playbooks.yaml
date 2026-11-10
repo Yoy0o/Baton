@@ -1,0 +1,148 @@
+# 场景剧本：调度系统（司机组重组、微调、同步）
+# 字段与规则见 docs/INTEGRATION_RULES.md 第 11 节。
+# 用途：规则模式按它执行；模型模式把识别结果和建议步骤放进系统提示词；工具多时网关按它补充路由。
+# 跨系统的场景放在“产出最终结果 / 被写入”的系统目录下：重组的结果写回调度系统，所以放在这里。
+version: 1
+
+intents:
+  - id: regroup
+    title: 重组司机组
+    icon: team
+    description: 按当前位置把排班司机分成若干组，在地图上展示，确认后写回调度系统
+    examples:
+      - 把华东区明天早班的司机按当前位置重新分成 5 组，每组不超过 8 人，先给我看地图和名单，确认后同步到调度系统
+      - 把华东区明天早班的司机分成 5 组，每组不超过 8 人
+    priority: 90
+    match:
+      any: [分组, 重组, 分成, 编组, 划分]
+    slots:
+      region: &region
+        type: choice
+        options: {north-china: [华北, 北京], east-china: [华东, 上海]}
+        default: east-china
+        description: 区域编码
+      shift: {type: choice, options: {late: [晚班], early: [早班]}, default: early, description: 班次}
+      date: {type: date, description: 排班日期}
+      groups: {type: number, before: [分成], unit: [组], loose: true, default: 5, description: 分几组}
+      max_size: {type: number, before: [不超过, 最多, 上限, 不多于], unit: [人, 个], description: 每组人数上限}
+      sync: &sync {type: flag, any: [同步, 写回, 提交, 调度系统], description: 是否写回调度系统}
+    steps:
+      - id: roster
+        call: tms__search_shift_drivers
+        args: {region: "{region}", date: "{date}", shift: "{shift}"}
+        on_error: 查询排班名单失败：{error}
+      - id: positions
+        call: fleet__get_driver_positions
+        args: {driver_ids: "{roster.result_id}"}
+        on_error: 获取司机位置失败：{error}
+      - id: plan
+        call: analytics__run_grouping
+        args: {points: "{positions.result_id}", groups: "{groups}", max_size: "{max_size}"}
+        on_error: 分组未完成：{error}
+      - id: show
+        show: {result: plan, color_by: group, title: 司机分组方案, ui: [fleet__show_result_layer], canvas: always}
+      - id: writeback
+        when: sync
+        write:
+          preview: dispatch__preview_regroup
+          apply: dispatch__apply_regroup
+          args: {region: "{region}", groups: "{plan.result_id}"}
+    answer: |-
+      {plan.summary}。
+
+      - 名单：{roster.summary}（排班系统），位置：{positions.summary}（车队系统）。
+      - 展示：已在{show.where}按组着色显示，分组方案 `{plan.result_id}`。
+      - {writeback.line}
+    suggestions:
+      by: writeback
+      cases:
+        skipped: [把 D0012 换到第 3 组, 同步到调度系统]
+        rejected: [把 D0012 换到第 3 组, 同步到调度系统]
+        applied: ["{examples.adjust}", "{examples.stops}"]
+      default: [同步到调度系统]
+
+  - id: adjust
+    title: 微调分组方案
+    icon: swap
+    description: 在已有分组方案上把指定司机换到别的组，其余司机和组号保持不变
+    examples:
+      - 把 D0012 换到第 3 组，然后同步到调度系统
+    priority: 100
+    match:
+      slots: [pins]
+    slots:
+      pins: {type: assignments, id: "D\\d{4}", unit: [组], description: 要固定到指定组的司机}
+      region: {<<: *region, from_call: tms__search_shift_drivers.region}
+      sync: *sync
+    requires:
+      - result: base
+        type: group_plan
+        scope: previous
+        message: |-
+          还没有可以调整的分组方案。请先生成方案，例如：
+
+          {examples.regroup}
+        suggestions: ["{examples.regroup}"]
+    steps:
+      - id: plan
+        call: analytics__run_grouping
+        args:
+          points: "{base.result_id}"
+          groups: "{base.data.params.groups|5}"
+          base_plan: "{base.result_id}"
+          pin: "{pins}"
+          max_size: "{base.data.params.max_size}"
+        on_error: 调整未完成：{error}
+      - id: show
+        show: {result: plan, color_by: group, title: 调整后的分组方案, ui: [fleet__show_result_layer], canvas: always}
+      - id: writeback
+        when: sync
+        write:
+          preview: dispatch__preview_regroup
+          apply: dispatch__apply_regroup
+          args: {region: "{region}", groups: "{plan.result_id}"}
+    answer: |-
+      已按要求调整：{plan.summary}。
+
+      - 展示：已在{show.where}更新，新方案 `{plan.result_id}`（基于 `{base.result_id}`，组号不变）。
+      - {writeback.line}
+    suggestions:
+      by: writeback
+      cases:
+        applied: ["{examples.track}"]
+      default: [同步到调度系统]
+
+  - id: sync
+    title: 同步到调度系统
+    icon: sync
+    description: 把本对话最近的分组方案预览并提交到调度系统
+    examples:
+      - 同步到调度系统
+    priority: 80
+    match:
+      any: [同步, 写回, 提交]
+    slots:
+      region: {<<: *region, from_call: tms__search_shift_drivers.region}
+    requires:
+      - result: base
+        type: group_plan
+        message: |-
+          还没有可同步的分组方案。请先生成方案。
+
+          {help}
+        suggestions: ["{examples.regroup}"]
+    steps:
+      - id: writeback
+        write:
+          preview: dispatch__preview_regroup
+          apply: dispatch__apply_regroup
+          args: {region: "{region}", groups: "{base.result_id}"}
+    answer: |-
+      分组方案 `{base.result_id}`。
+
+      - {writeback.line}
+    suggestions:
+      by: writeback
+      cases:
+        applied: ["{examples.track}", "{examples.stops}"]
+      default: [把 D0012 换到第 3 组]

@@ -196,9 +196,10 @@ def _parse_message(msg: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def make_llm(settings: Settings, http: httpx.AsyncClient) -> LLM:
+def make_llm(settings: Settings, http: httpx.AsyncClient, library: Any = None) -> LLM:
+    """配置了模型时用 OpenAI 兼容接口；否则用规则模式，按 library（IntentLibrary）中的场景剧本执行。"""
     if settings.llm_enabled:
         return OpenAICompatLLM(settings, http)
     from .rule_planner import RulePlanner
 
-    return RulePlanner(settings)
+    return RulePlanner(settings, library)

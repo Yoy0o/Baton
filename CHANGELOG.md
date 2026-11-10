@@ -12,6 +12,12 @@
 - 开发留痕：本文件、`docs/adr/`（架构决策记录，补记 v0.2 基线决策 ADR-0001 至 0009）、`docs/devlog/`（开发日志）。
 - 代码检查与 CI：`ruff check .`（配置在 `pyproject.toml`）；`.github/workflows/ci.yml` 跑 ruff、pytest、前端构建和 `web/dist` 一致性检查；`.gitattributes` 统一 LF 换行（ADR-0010）。
 - Windows 上自动安装 `tzdata`，保证 `AGENT_TZ` 可识别。
+- 场景剧本（ADR-0011，接入规则第 11 节，R11.1–R11.7）：清单新增可选字段 `playbooks`，指向同目录下的 `playbooks.yaml`，声明意图的触发词、优先级、槽位、前置条件、步骤（`call` / `show` / `write`）、答复模板与追问建议；加载时校验工具名、模板引用，并保证剧本不能绕过两段式写入。`fleet`、`dispatch` 附带剧本，覆盖原规则模式的 6 个场景。新的槽位类型在 `agent/slots.py` 用 `@extractor` 注册。
+- 模型模式下，系统提示词新增“本轮任务识别”一节：识别出的意图、已取出的参数、建议步骤、未满足的前置条件（仅供参考，识别不到时不出现）。
+- `GET /api/intents`：列出场景剧本；带 `text` 参数时只识别不执行，返回命中项、槽位和给模型的提示，供接入方调试。`GET /api/config` 新增 `presets`（可单独发起的意图），工作台的常用任务改由它生成，接入新剧本后自动出现。
+- 工作台事件 `run_started` 新增可选字段 `intent`（`{id, title, system, score}` 或 `null`）。
+- 网关新增错误码 `REPEATED_CALL`：同一次运行里，工具名和参数都相同、且上次以不可重试的错误失败的调用，直接拒绝并记审计，不再调用系统（界面未打开 `UI_NOT_CONNECTED` 除外）。
+- `python -m agent.check` 列出各系统的场景，并提醒引用了未接入系统而不可用的场景。
 
 ### 变更
 
@@ -29,6 +35,10 @@
 
 - 默认用户从 `demo` 改为 `local`：已有的本地对话按用户归属，升级后看不到旧对话时，把 `data/conversations/*.json` 里的 `"user": "demo"` 改为 `"local"`，或在 `.env` 中设置 `AGENT_DEFAULT_USER` 为旧值。
 - `run.py` 的端口、监听地址、产品名、模型配置改从 `Settings` 读取，与 Agent 服务一致；前端构建产物目录跟随 `AGENT_WEB_DIR`。
+- 规则模式改为“意图识别 + 场景剧本”执行，`rule_planner.py` 不再包含具体场景；原有 6 个场景的工具调用顺序、参数和答复不变。帮助文本按剧本自动生成，列出全部场景。
+- 轨迹回放没有给出司机 ID 时，规则模式先询问是哪位司机（原来默认回放 D0012）。
+- 工具路由：工具总数超过 `AGENT_FULL_CATALOG_LIMIT` 时，除了清单 `keywords` 命中的系统，也保留识别出的意图引用的系统和上一轮用过的系统，追问不再因为没提到关键词而丢工具。
+- 工具调度：模型一次给出多个调用时，相邻的只读 / 只改界面调用并行执行，写操作单独执行（原来只要含一个写操作，整轮全部串行）；无参工具的参数为 `null` 时按空对象处理，不再报参数错误。
 
 ### 修复
 
