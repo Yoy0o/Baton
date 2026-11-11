@@ -20,11 +20,15 @@ def test_model_matching_the_playbooks_passes(settings, transport):
         settings.llm_base_url, settings.llm_model, settings.llm_api_key = "http://llm.test:9000/v1", "fake-model", "sk-test"
         model, reports = await evaluate(settings, transport)
         assert model == "fake-model" and [r.id for r in reports] == ["regroup", "stops", "track", "locate"]
-        assert all(r.passed and not r.problems for r in reports)
+        by_id = {r.id: r for r in reports}
+        assert by_id["regroup"].passed and by_id["stops"].passed and not any(r.problems for r in reports)
+        # 只靠界面工具的场景：评测环境没有系统页面，参考运行什么都没调用，标为未评测而不是“通过”
+        assert by_id["track"].skipped and by_id["locate"].skipped and not by_id["track"].passed
         regroup = reports[0]
         assert regroup.model.tools == regroup.reference.tools and regroup.model.tools[-1] == "dispatch__apply_regroup"
         assert regroup.reference.confirm_requested and regroup.model.confirm_requested
-        assert "4/4 个场景通过" in render(model, reports)
+        text = render(model, reports)
+        assert "2/2 个场景通过，2 个未评测" in text and "– track" in text
         # 默认自动取消确认：流程走到了确认，但业务系统没有被修改；正式数据目录也没有被写入
         async with httpx.AsyncClient(transport=transport) as http:
             assert (await http.get("http://localhost:8103/api/groups?region=east-china")).json()["version"] == 1

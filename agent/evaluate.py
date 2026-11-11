@@ -10,9 +10,10 @@
 接入新系统并写了剧本后，评测自动覆盖它。
 
 需要：业务系统已启动（与 agent.check 相同）、已配置 LLM_BASE_URL / LLM_MODEL。
-两边各用一个临时数据目录，不读写正式的对话、结果、审计。没有内嵌的系统页面，展示类步骤两边都走工作台画布。
+两边各用一个临时数据目录，不读写正式的对话、结果、审计。评测环境里没有内嵌的系统页面：展示类步骤两边都走工作台画布；
+完全依赖界面工具的场景（如轨迹回放）参考运行不会调用任何工具，这类场景标为“未评测”，不计入通过数。
 确认卡片默认自动点“取消”：能验证流程走到了确认，又不修改业务系统。
-退出码：0 全部通过，1 有场景未通过或参考运行失败，2 环境不满足（没配模型、系统没启动）。
+退出码：0 评测到的场景全部通过，1 有场景未通过或参考运行失败，2 环境不满足（没配模型、系统没启动、没有可评测的场景）。
 """
 from __future__ import annotations
 
@@ -58,6 +59,7 @@ class CaseReport:
     reference: Trace
     model: Trace
     passed: bool = False
+    skipped: bool = False  # 参考运行没有调用任何工具（需要系统页面），没有可对照的东西
     problems: list[str] = field(default_factory=list)  # 不通过的原因
     notes: list[str] = field(default_factory=list)  # 不影响通过、但值得看一眼的差异
 
@@ -171,9 +173,12 @@ async def evaluate(
                 # 参考答案本身不成立（系统数据、剧本或环境有问题），这个场景没法判
                 detail = reference.error or "、".join(reference.errors) or reference.status
                 report.problems = [f"参考运行（规则模式）失败：{detail}"]
+            elif not reference.tools:
+                report.skipped = True
+                report.notes = ["参考运行没有调用任何工具：这个场景需要已打开的系统页面，评测环境里没有，未评测"]
             else:
                 report.problems, report.notes = compare(reference, model)
-            report.passed = not report.problems
+            report.passed = not report.problems and not report.skipped
             reports.append(report)
         return cand.llm.label, reports
     finally:
@@ -186,8 +191,9 @@ def render(model: str, reports: list[CaseReport]) -> str:
     for r in reports:
         m = r.model
         tokens = f"，{m.usage['total_tokens']} tokens" if m.usage.get("total_tokens") else ""
+        mark = "–" if r.skipped else "✓" if r.passed else "✗"
         lines.append(
-            f"\n{'✓' if r.passed else '✗'} {r.id} · {r.title}：工具 {len(m.tools)} 次（参考 {len(r.reference.tools)}），"
+            f"\n{mark} {r.id} · {r.title}：工具 {len(m.tools)} 次（参考 {len(r.reference.tools)}），"
             f"模型 {m.steps} 轮（参考 {r.reference.steps}），{m.duration_ms / 1000:.1f} 秒{tokens}"
         )
         lines.append(f"    指令：{r.prompt}")
@@ -195,11 +201,12 @@ def render(model: str, reports: list[CaseReport]) -> str:
             lines.append(f"    ✗ {text}")
         for text in r.notes:
             lines.append(f"    ! {text}")
-        if r.problems or r.notes:
+        if not r.skipped and (r.problems or r.notes):
             lines.append("    参考：" + (" → ".join(r.reference.tools) or "（无调用）"))
             lines.append("    模型：" + (" → ".join(m.tools) or "（无调用）"))
-    passed = sum(1 for r in reports if r.passed)
-    lines.append(f"\n结果：{passed}/{len(reports)} 个场景通过")
+    judged = [r for r in reports if not r.skipped]
+    skipped = f"，{len(reports) - len(judged)} 个未评测" if len(judged) < len(reports) else ""
+    lines.append(f"\n结果：{sum(1 for r in judged if r.passed)}/{len(judged)} 个场景通过{skipped}")
     return "\n".join(lines)
 
 
@@ -222,7 +229,10 @@ def main() -> None:
     if args.json_path:
         payload = {"model": model, "approve": args.approve, "cases": [asdict(r) for r in reports]}
         Path(args.json_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    sys.exit(0 if all(r.passed for r in reports) else 1)
+    judged = [r for r in reports if not r.skipped]
+    if not judged:
+        sys.exit(2)  # 一个都没评到（都需要系统页面）：不能当作通过
+    sys.exit(0 if all(r.passed for r in judged) else 1)
 
 
 if __name__ == "__main__":
