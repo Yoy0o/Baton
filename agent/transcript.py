@@ -9,6 +9,25 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+
+def estimate_tokens(messages: list[dict[str, Any]]) -> int:
+    """粗略估算一组消息占多少 token，用来给发给模型的历史定预算（不依赖具体模型的分词器）。
+
+    中日韩文字按每字 1 个，其他字符按每 4 个字符 1 个，每条消息另加 4 个结构开销。
+    对中文偏保守（实际常见 0.6–1 个 / 字），宁可多裁一轮也不要超出模型上下文。
+    """
+    total = 0
+    for m in messages:
+        text = m.get("content") or ""
+        if not isinstance(text, str):
+            text = json.dumps(text, ensure_ascii=False, default=str)
+        if m.get("tool_calls"):
+            text += json.dumps(m["tool_calls"], ensure_ascii=False, default=str)
+        wide = sum(1 for ch in text if ch >= "\u2e80")
+        total += wide + (len(text) - wide + 3) // 4 + 4
+    return total
+
+
 # 视为“用户没有同意”的错误码：写操作据此区分“被拒绝”和“提交失败”
 REJECTED_CODES = frozenset({"USER_REJECTED", "CONFIRM_TIMEOUT"})
 

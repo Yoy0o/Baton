@@ -41,12 +41,16 @@ class Settings:
     llm_model: str = field(default_factory=lambda: _env("LLM_MODEL"))
     llm_timeout_s: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT_S", "90")))
     llm_temperature: float = field(default_factory=lambda: float(_env("LLM_TEMPERATURE", "0.2")))
+    # 模型接口限流（429）、服务端错误（5xx）或连接失败时的重试次数；已经开始输出文字后不重试
+    llm_max_retries: int = field(default_factory=lambda: int(_env("LLM_MAX_RETRIES", "2")))
     # 流式输出：模型接口不支持 stream 时自动退回一次性返回
     llm_stream: bool = field(default_factory=lambda: _env("LLM_STREAM", "true").lower() not in ("0", "false", "no", "off"))
     # 规则模式（未配置模型）下模拟流式输出的字间隔（秒），0 表示不模拟
     rule_stream_delay_s: float = field(default_factory=lambda: float(_env("RULE_STREAM_DELAY_S", "0.012")))
 
     max_steps: int = field(default_factory=lambda: int(_env("AGENT_MAX_STEPS", "12")))
+    # 发给模型的对话历史的 token 预算（估算值，不含系统提示词和工具定义）；超出时从最早的一轮开始丢
+    history_tokens: int = field(default_factory=lambda: int(_env("AGENT_HISTORY_TOKENS", "24000")))
     confirm_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_CONFIRM_TIMEOUT_S", "600")))
     ui_call_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_UI_CALL_TIMEOUT_S", "20")))
     http_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_HTTP_TIMEOUT_S", "30")))

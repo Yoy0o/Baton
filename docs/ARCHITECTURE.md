@@ -136,7 +136,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | --- | --- | --- |
 | `hello` | 连接建立，附当前桥接状态 | 否 |
 | `conversation_created` | 新对话的 ID、标题、时间 | 否 |
-| `run_started` / `run_finished` / `run_error` | 一次运行的开始（附识别出的意图 `intent: {id, title, system, score}`，没识别到为 `null`）、结束（`completed` / `stopped` / `error` / `interrupted`，附追问建议）、失败 | 是 |
+| `run_started` / `run_finished` / `run_error` | 一次运行的开始（附识别出的意图 `intent: {id, title, system, score}`，没识别到为 `null`）、结束（`completed` / `stopped` / `error` / `interrupted`，附追问建议；模型接口给了用量时附 `usage: {prompt_tokens, completion_tokens, total_tokens, llm_calls}`，为本次运行各轮之和）、失败 | 是 |
 | `text_delta` / `reasoning_delta` | 逐字输出的答复 / 思考过程 | 否（由 `thought`、`message` 保存最终文本） |
 | `thought` | 模型在调用工具前说的话及思考过程 | 是 |
 | `tool_call_started` / `tool_call_finished` | 每次工具调用：标题、所属系统及其标识色、类型、风险、参数、结果摘要、错误、耗时 | 是 |
@@ -167,7 +167,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - **模型模式**：识别结果写进系统提示词的“本轮任务识别”一节（意图、已取出的参数、建议步骤、未满足的前置条件、其他可能），标明仅供参考；识别不到时不加这一节。
 - **路由与工作台**：识别出的意图引用的系统交给网关路由（`prefer`）；可单独发起的意图作为工作台“常用任务”（`/api/config` 的 `presets`）；`GET /api/intents?text=` 只识别不执行，返回命中项、槽位和给模型的提示，供接入方调试。
 
-配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。
+配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。模型调用（`llm.py`）遇到限流、服务端错误或连接失败时按 `LLM_MAX_RETRIES` 退避重试，但已经把文字推给工作台之后不重试（重发会让文字重复），直接报错；接口返回 token 用量时累计到 `run_finished.usage`。发给模型的历史按用户消息为界从最早的一轮丢起，同时受条数（60）和估算的 token 预算（`AGENT_HISTORY_TOKENS`）限制。
 
 ### 3.8 MCP 调试端点（POST /mcp）
 
@@ -199,6 +199,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | `APP_NAME` / `APP_TAGLINE` | Baton / 多系统编排台 | 产品名与副标题（工作台标题、侧栏、服务名） |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | 空 | OpenAI 兼容接口；不填为规则模式 |
 | `LLM_TIMEOUT_S` / `LLM_TEMPERATURE` | 90 / 0.2 | 模型调用超时与温度 |
+| `LLM_MAX_RETRIES` | 2 | 模型接口限流（429）、服务端错误（5xx）、连接失败时的重试次数（退避 0.5、1、2…秒，遵守 `Retry-After`，上限 20 秒）；已经开始输出后不重试 |
 | `LLM_STREAM` | true | 流式输出；接口不支持时自动退回一次性返回 |
 | `RULE_STREAM_DELAY_S` | 0.012 | 规则模式模拟逐字输出的间隔，0 为不模拟 |
 | `AGENT_HOST` / `AGENT_PORT` | 127.0.0.1 / 8000 | Agent 服务监听地址 |
@@ -208,6 +209,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | `AGENT_WEB_DIR` | ./web/dist | 工作台构建产物目录 |
 | `AGENT_MANIFESTS` | systems/*/manifest.yaml | 接入清单位置 |
 | `AGENT_MAX_STEPS` | 12 | 单次运行最多调用模型的轮数 |
+| `AGENT_HISTORY_TOKENS` | 24000 | 发给模型的对话历史的 token 预算（估算值，不含系统提示词和工具定义）；超出时从最早的一轮开始丢，当前这一轮整轮保留；0 为不按长度裁剪（仍有 60 条的上限） |
 | `AGENT_CONFIRM_TIMEOUT_S` | 600 | 等待用户确认的时长 |
 | `AGENT_UI_CALL_TIMEOUT_S` | 20 | 界面工具调用超时 |
 | `AGENT_HTTP_TIMEOUT_S` | 30 | 调用业务系统接口的 HTTP 超时 |

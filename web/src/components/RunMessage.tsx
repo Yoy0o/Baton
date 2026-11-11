@@ -4,7 +4,7 @@ import { Alert, App as AntApp, Button, Tooltip } from 'antd';
 import { memo, useState } from 'react';
 import { copyText } from '../clipboard';
 import { useWorkbench } from '../context';
-import { formatDuration } from '../format';
+import { formatDuration, formatTokens } from '../format';
 import type { Run, ToolStep } from '../store';
 import { ConfirmCard } from './ConfirmCard';
 import { Markdown } from './Markdown';
@@ -112,6 +112,13 @@ export const RunMessage = memo(function RunMessage({ run, isLast }: { run: Run; 
             </Tooltip>
           </div>
           {run.durationMs !== undefined && <span className="bt-run-time">用时 {formatDuration(run.durationMs)}</span>}
+          {run.usage?.total_tokens ? (
+            <Tooltip
+              title={`模型调用 ${run.usage.llm_calls ?? 1} 次：输入 ${run.usage.prompt_tokens ?? 0}，输出 ${run.usage.completion_tokens ?? 0} tokens`}
+            >
+              <span className="bt-run-time">{formatTokens(run.usage.total_tokens)} tokens</span>
+            </Tooltip>
+          ) : null}
         </div>
       )}
     </div>
