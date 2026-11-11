@@ -1,6 +1,6 @@
 # 系统接入规则 v1
 
-适用版本：Baton v0.2（v0.1 时名为 Agent Hub，规则本身未变，v0.2 只补充了 R5.5–R5.7 和清单的 `color`、界面工具 `title` 两个可选字段；未发布版本新增第 11 节场景剧本与清单的 `playbooks` 字段）。规则编号（R1.1 等）与代码中的校验提示一一对应；标注 **[校验]** 的规则由 `agent/manifest.py`、网关或 `python -m agent.check` 自动检查，违反时拒绝加载或拒绝注册。
+适用版本：Baton v0.3（v0.1 时名为 Agent Hub，规则本身未变；v0.2 补充了 R5.5–R5.7 和清单的 `color`、界面工具 `title` 两个可选字段；v0.3 新增第 11 节场景剧本与清单的 `playbooks` 字段、R3.7 预览版本校验、R5.8 桥接来源校验）。规则编号（R1.1 等）与代码中的校验提示一一对应；标注 **[校验]** 的规则由 `agent/manifest.py`、网关或 `python -m agent.check` 自动检查，违反时拒绝加载或拒绝注册。
 
 一句话：**一个系统 = 一份接入清单（manifest.yaml）+ 可选的知识包（SKILL.md）+ 可选的格式钩子（adapter_hooks.py）+ 可选的场景剧本（playbooks.yaml）**。系统后端不改代码；需要界面能力时，前端加一个 SDK 和几个处理函数。
 
@@ -34,7 +34,7 @@
 - **R2.6** 数组参数放在 query 中时，平台传逗号分隔字符串（如 `driver_ids=D0001,D0002`）；接口参数类型声明为 array 时则按重复参数传。
 - **R2.7** 时间用带时区的 ISO 8601；单位写进字段名（`radius_m`、`duration_min`、`lookback_h`）。
 - **R2.8** 系统格式与平台约定不一致时，用清单 `hooks.request` / `hooks.response` 指定一个 Python 函数做格式映射，签名为 `hook(args: dict, ctx: dict) -> dict`。钩子只做字段映射，不写业务逻辑。
-- **R2.9** 平台调用系统时附带请求头 `X-Agent-User`、`X-Agent-Session`（对话 ID）、`X-Request-Id`，系统可写入自己的日志，便于追踪。
+- **R2.9** 平台调用系统时附带请求头 `X-Agent-User`、`X-Agent-Session`（对话 ID）、`X-Request-Id`，系统可写入自己的日志，便于追踪。提交写操作时另带 `Idempotency-Key`（R3.4）和 `If-Match`（R3.7，预览给了 `etag` 时）。
 
 ## 3. 写操作
 
@@ -44,6 +44,7 @@
 - **R3.4** 提交接口必须支持 `Idempotency-Key` 请求头：同一个键重复提交时返回第一次的结果，不重复执行。平台用 `confirm_token` 作为该键。
 - **R3.5 [校验]** 风险等级：`write` = 可回滚的业务修改；`critical` = 不可逆或影响面大（v1 与 write 同样需要确认，后续版本加二次确认和角色限制）。
 - **R3.6** 确认由运行时强制：网关签发的 `confirm_token` 10 分钟有效、只属于发起它的会话；用户在工作台点“确认”后才调用提交接口。没有工作台确认通道的调用（如 MCP 调试端点）一律拒绝写入。
+- **R3.7** 预览之后数据变了要拒绝提交（ADR-0013）：预览接口在返回值里加 `etag`（字符串或整数，代表这次预览所依据的数据版本，内容由系统自定，如版本号、更新时间的摘要）；平台在提交时用 `If-Match` 请求头原样带回。提交接口发现它与当前版本不一致时返回 409 或 412，不落库；平台据此告诉用户“预览之后数据已经变化，没有提交”（错误码 `PREVIEW_STALE`），并要求重新预览、重新确认。预览不返回 `etag` 的系统，平台不发 `If-Match`，预览到提交之间的数据变化平台发现不了——用户确认的清单可能和实际落库的不一样，写系统应当提供这层保护。参考实现：`systems/dispatch/app.py`。
 
 ## 4. 结果引用
 
@@ -68,6 +69,7 @@
 - **R5.5** 页面需允许被工作台以 iframe 嵌入（CSP `frame-ancestors` 包含工作台地址），并在清单 `ui_bridge.embed_url` 声明内嵌地址；工作台会追加 `?agent=<Agent 地址>&agent_client=<工作台窗口 ID>` 参数，SDK 默认从这两个参数读取连接信息（旧参数名 `agent_session` 仍兼容）。不带参数打开时页面照常独立运行。
 - **R5.6** Agent 优先操作发起对话的那个工作台窗口里内嵌的页面；没有时使用同一用户最近打开的页面。页面关闭或断开时，对应界面工具从可用列表中消失。
 - **R5.7** 界面工具可能在页面不可见时被调用：工作台收起工作区、或停留在别的页签时，内嵌页面仍在运行但尺寸为 0。依赖尺寸的操作（缩放到范围、测量、截图）要等页面可见后再执行，例如记下待执行的缩放，在 `resize` 时补做（参考 `map.html` 中的 `fitBounds`）。工具本身照常返回成功。
+- **R5.8 [校验]** 桥接连接校验浏览器来源：页面所在的源（协议 + 主机 + 端口）必须是该系统清单 `base_url` 或 `ui_bridge.embed_url` 的源，或由平台管理员加入 `AGENT_ALLOWED_ORIGINS`；否则握手被拒绝（403），Agent 服务日志里有来源和修正办法。本机地址的 `localhost` 与 `127.0.0.1` 视为同一个。
 
 ## 6. 描述与知识包
 
@@ -83,7 +85,7 @@
 
 - **R8.1 [校验]** `auth.mode` 取值：`none`（仅限本地开发与测试）、`static_bearer`（从 `token_env` 指定的环境变量读取令牌，加到 `Authorization: Bearer`）。以用户身份换取令牌的 `token_exchange` 在 v1 中未实现，配置会被拒绝。
 - **R8.2** 系统必须自行校验权限，不能因为请求来自 Agent 就放行；界面工具运行在登录用户的页面里，后端接口同样要鉴权。
-- **R8.3** 所有工具调用由网关写入审计日志 `data/audit.jsonl`（用户、会话、工具、风险、参数摘要、结果、耗时、是否经确认）。
+- **R8.3** 所有工具调用由网关写入审计日志 `data/audit.jsonl`（用户、会话、工具、风险、参数摘要、结果、耗时、是否经确认）。文件超过 `AGENT_AUDIT_ROTATE_MB` 时改名为 `audit-<时间>.jsonl` 留存，平台不自动删除。
 - **R8.4** 系统返回的文本（备注、地址等）只作为数据使用；不要在返回值里放给模型的指令。
 
 ---
@@ -93,11 +95,11 @@
 1. 确认系统的 OpenAPI 文档可访问，要暴露的接口都有 `operationId`。
 2. 新建 `systems/<system>/manifest.yaml`：填 `system`、`title`、`base_url`、`keywords`，在 `api.expose` 里逐个列出接口，重写 `description`，标风险等级。
 3. 需要接收上一步结果的参数，加 `params.<名>.accepts_result`；固定值参数用 `fixed` 隐藏。
-4. 有写操作：补齐预览 / 提交成对接口，预览工具加 `pairs_with`，提交接口支持 `Idempotency-Key`。
+4. 有写操作：补齐预览 / 提交成对接口，预览工具加 `pairs_with`，提交接口支持 `Idempotency-Key`；预览返回 `etag`，提交校验 `If-Match`（R3.7）。
 5. 格式对不上：写 `adapter_hooks.py` 并在清单 `hooks` 中引用。
 6. 需要界面能力：页面引入 SDK，注册工具（参考 `systems/fleet/static/map.html` 末尾），清单 `ui_bridge` 中声明白名单和 `embed_url`，并放开 iframe 嵌入。
 7. 写 `SKILL.md`。
-8. 可选：为常见任务写场景剧本 `playbooks.yaml`（第 11 节），清单里加 `playbooks: playbooks.yaml`。用 `GET /api/intents?text=<一句提问>` 检查能否识别、参数取得对不对。
+8. 可选：为常见任务写场景剧本 `playbooks.yaml`（第 11 节），清单里加 `playbooks: playbooks.yaml`。上线后用 `GET /api/intents/log` 看没识别到的提问，据此补触发词。用 `GET /api/intents?text=<一句提问>` 检查能否识别、参数取得对不对。
 9. 启动系统后运行 `python -m agent.check systems/<system>/manifest.yaml -v`，应为 0 个错误；再在工作区“工具”页签确认工具和描述。
 10. 在工作台用 3–5 句真实提问试跑（有剧本的场景在规则模式和模型模式各跑一遍），在工作区“审计”页签核对每次调用。
 

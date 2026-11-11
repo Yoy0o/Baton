@@ -25,6 +25,10 @@ class Settings:
     port: int = field(default_factory=lambda: int(_env("AGENT_PORT", "8000")))
     # 浏览器访问 Agent 服务的地址：内嵌系统页面用它连接桥接中心、读取结果
     public_url: str = field(default_factory=lambda: _env("AGENT_PUBLIC_URL", "http://localhost:8000"))
+    # 额外允许的浏览器来源（逗号分隔，如前端开发时的 http://localhost:5173）。默认只允许 public_url 和各系统清单里的地址（ADR-0012）
+    allowed_origins: list[str] = field(
+        default_factory=lambda: [o.strip().rstrip("/") for o in _env("AGENT_ALLOWED_ORIGINS").split(",") if o.strip()]
+    )
     manifests_glob: str = field(
         default_factory=lambda: _env("AGENT_MANIFESTS", str(ROOT / "systems" / "*" / "manifest.yaml"))
     )
@@ -37,16 +41,22 @@ class Settings:
     llm_model: str = field(default_factory=lambda: _env("LLM_MODEL"))
     llm_timeout_s: float = field(default_factory=lambda: float(_env("LLM_TIMEOUT_S", "90")))
     llm_temperature: float = field(default_factory=lambda: float(_env("LLM_TEMPERATURE", "0.2")))
+    # 模型接口限流（429）、服务端错误（5xx）或连接失败时的重试次数；已经开始输出文字后不重试
+    llm_max_retries: int = field(default_factory=lambda: int(_env("LLM_MAX_RETRIES", "2")))
     # 流式输出：模型接口不支持 stream 时自动退回一次性返回
     llm_stream: bool = field(default_factory=lambda: _env("LLM_STREAM", "true").lower() not in ("0", "false", "no", "off"))
     # 规则模式（未配置模型）下模拟流式输出的字间隔（秒），0 表示不模拟
     rule_stream_delay_s: float = field(default_factory=lambda: float(_env("RULE_STREAM_DELAY_S", "0.012")))
 
     max_steps: int = field(default_factory=lambda: int(_env("AGENT_MAX_STEPS", "12")))
+    # 发给模型的对话历史的 token 预算（估算值，不含系统提示词和工具定义）；超出时从最早的一轮开始丢
+    history_tokens: int = field(default_factory=lambda: int(_env("AGENT_HISTORY_TOKENS", "24000")))
     confirm_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_CONFIRM_TIMEOUT_S", "600")))
     ui_call_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_UI_CALL_TIMEOUT_S", "20")))
     http_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_HTTP_TIMEOUT_S", "30")))
     result_ttl_s: int = field(default_factory=lambda: int(_env("AGENT_RESULT_TTL_S", str(24 * 3600))))
+    # 审计文件超过这个大小（MB）时改名留存、另起新文件；0 为不轮转。平台不删除审计文件
+    audit_rotate_mb: float = field(default_factory=lambda: float(_env("AGENT_AUDIT_ROTATE_MB", "50")))
     # 工具总数不超过该值时全量加载；超过时按系统关键词路由，只加载相关系统
     full_catalog_limit: int = field(default_factory=lambda: int(_env("AGENT_FULL_CATALOG_LIMIT", "30")))
     # 未接 SSO 时所有请求归属的用户：对话、结果、审计、X-Agent-User 请求头都用它

@@ -33,6 +33,7 @@ from .results import ResultStore
 log = logging.getLogger("agent.gateway")
 
 CONFIRM_TTL_S = 600  # confirm_token 有效期（R3.2）
+_CONFIRM_KEEP_S = 3600  # 过期后再留这么久才清理：仍在等用户确认的条目要留着，重复提交也还能得到明确的错误
 _RELOAD_INTERVAL_S = 5
 # 不记为“失败过”的错误：停止任务不是调用本身的问题；界面未打开可能在运行中变化（用户打开了页面）
 _UNTRACKED_FAILURES = {"CANCELLED", "REPEATED_CALL", "UI_NOT_CONNECTED"}
@@ -55,7 +56,8 @@ class PendingConfirm:
     columns: list[str]
     created_at: float = field(default_factory=time.time)
     expires_at: float = 0.0
-    status: str = "pending"  # pending | approved | rejected | consumed
+    etag: str | None = None  # 预览时的数据版本（R3.7）：提交时以 If-Match 带回，系统发现已变化就拒绝
+    status: str = "pending"  # pending | approved | rejected | consumed | stale
     result: dict[str, Any] | None = None
 
 
@@ -202,7 +204,7 @@ class Gateway:
         confirmed = None
         if spec is not None and spec.needs_confirmation:
             entry = self.confirms.get(str(args.get("confirm_token", "")))
-            if entry is not None and entry.status in ("approved", "consumed"):
+            if entry is not None and entry.status in ("approved", "consumed", "stale"):
                 confirmed = True
             elif (entry is not None and entry.status == "rejected") or envelope.get("error_code") in (
                 "USER_REJECTED",
@@ -274,6 +276,10 @@ class Gateway:
         changes = [c for c in changes if isinstance(c, dict)][:200]
         columns = list(dict.fromkeys(k for c in changes[:50] for k in c))
         summary = raw.get("summary") if isinstance(raw.get("summary"), str) else outcome.envelope.get("summary", "")
+        etag = raw.get("etag")
+        now = time.time()
+        for old in [t for t, e in self.confirms.items() if now > e.expires_at + _CONFIRM_KEEP_S]:
+            self.confirms.pop(old, None)  # 清理早已过期的令牌，避免长期运行时只增不减
         token = "cf_" + uuid.uuid4().hex[:12]
         assert spec.pairs_with
         self.confirms[token] = PendingConfirm(
@@ -286,9 +292,10 @@ class Gateway:
             summary=summary,
             changes=changes,
             columns=columns,
+            etag=str(etag) if isinstance(etag, (str, int)) and not isinstance(etag, bool) and str(etag) else None,
             expires_at=time.time() + CONFIRM_TTL_S,
         )
-        extra = {k: v for k, v in raw.items() if k not in ("changes", "summary")}
+        extra = {k: v for k, v in raw.items() if k not in ("changes", "summary", "etag")}
         return ok_envelope(
             f"{summary}（预览，未落库）",
             data=extra or None,
@@ -314,6 +321,8 @@ class Gateway:
             return {**entry.result, "summary": entry.result.get("summary", "") + "（此前已提交，未重复执行）"}
         if entry.status == "rejected":
             raise ToolError("USER_REJECTED", "用户已拒绝这次变更", "不要重复提交；询问用户需要如何调整")
+        if entry.status == "stale":
+            raise self._stale(entry)
         if time.time() > entry.expires_at:
             raise ToolError("CONFIRM_TOKEN_EXPIRED", "confirm_token 已过期", "重新调用预览工具")
         if ctx.confirm is None:
@@ -334,12 +343,27 @@ class Gateway:
             raise
 
     async def _commit(self, ctx: CallContext, spec: ToolSpec, entry: PendingConfirm) -> dict[str, Any]:
-        outcome = await self.apis[spec.system].call(
-            spec.name, entry.request_args, ctx, idempotency_key=entry.token, replay=True
-        )
+        try:
+            outcome = await self.apis[spec.system].call(
+                spec.name, entry.request_args, ctx, idempotency_key=entry.token, replay=True, if_match=entry.etag
+            )
+        except ToolError as e:
+            # 带了预览版本、系统答复“已变化”（R3.7）：用户确认的清单已经不是会提交的内容，令牌作废，必须重新预览
+            if entry.etag and e.code in ("HTTP_409", "HTTP_412"):
+                entry.status = "stale"
+                raise self._stale(entry) from e
+            raise
         entry.status = "consumed"
         entry.result = outcome.envelope
         return outcome.envelope
+
+    def _stale(self, entry: PendingConfirm) -> ToolError:
+        system = self.system_title(entry.apply_tool.partition("__")[0])
+        return ToolError(
+            "PREVIEW_STALE",
+            f"预览之后{system}的数据已经变化，这次变更没有提交",
+            f"重新调用 {entry.preview_tool} 获取最新的变更清单，再提交并请用户重新确认；不要沿用旧的 confirm_token",
+        )
 
     def _audit_late_commit(self, ctx: CallContext, spec: ToolSpec, entry: PendingConfirm, task: asyncio.Future, started: float) -> None:
         if task.cancelled():

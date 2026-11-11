@@ -1,4 +1,4 @@
-# Baton v0.2 · 多系统编排台
+# Baton v0.3 · 多系统编排台
 
 一个通用 Agent，通过“能力网关”调度多个偏操作类的 Web 系统（类 GIS）。名字取自指挥棒和接力棒：Agent 不替代任何系统，只负责把一个任务在几个系统之间指挥、传递下去。
 
@@ -10,9 +10,11 @@
 
 v0.2 把工作台重做成常规的 Agent 工作台（React + Ant Design X）：左侧对话列表，中间对话，右侧工作区（业务系统页面、结果、工具、审计）。对话会保存，刷新、断线重连、服务重启后都能如实还原。
 
+v0.3 把编排改成由各系统的场景剧本驱动（接入新系统、新场景不改代码），并补上单用户版放心使用需要的几件事：确认通道只对工作台页面开放、预览之后数据变了不提交、模型调用失败重试、审计和结果的留存、模型对照评测。
+
 产品名可在 `.env` 里用 `APP_NAME` 修改（标题、侧栏、服务名都从这里读取），不需要改代码。
 
-架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。参与开发（包括用编码 Agent）先读 [AGENTS.md](AGENTS.md)。
+架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)，后续方向与优先级见 [docs/ROADMAP.md](docs/ROADMAP.md)。参与开发（包括用编码 Agent）先读 [AGENTS.md](AGENTS.md)。
 
 ## 快速开始
 
@@ -35,17 +37,21 @@ LLM_MODEL=qwen-plus
 LLM_API_KEY=sk-...
 ```
 
-**前端开发**：`python run.py` 启动后端，另开终端 `cd web && npm run dev`，打开 Vite 给出的地址（接口、桥接 SDK、WebSocket 都代理到 8000 端口）。
+**换了模型先评测**：系统启动后运行 `python -m agent.evaluate`。它把各系统场景剧本的示例分别交给规则模式和配置的模型，对照工具调用（该调的有没有调、有没有走到写操作确认、多用了几轮），逐个场景给出通过与否。确认卡片默认自动取消，不会修改业务系统；评测用临时数据目录，不影响正式的对话和审计。
+
+**前端开发**：在 `.env` 里加 `AGENT_ALLOWED_ORIGINS=http://localhost:5173`（Agent 服务只接受允许列表里的浏览器来源），`python run.py` 启动后端，另开终端 `cd web && npm run dev`，打开 Vite 给出的地址（接口、桥接 SDK、WebSocket 都代理到 8000 端口）。
+
+**换地址访问**：通过 `http://localhost:8000` 以外的地址（局域网 IP、域名、反向代理）打开工作台时，把 `AGENT_PUBLIC_URL` 改成该地址；否则工作台会一直显示断线，Agent 服务日志里有被拒绝的来源。
 
 ## 工作台
 
 | 区域 | 内容 | 常用操作 |
 | --- | --- | --- |
 | 左侧对话列表 | 按今天、昨天、近 7 天分组；执行中显示转圈，有写操作待确认显示“待确认” | 新对话；重命名、删除；超过 6 个对话时可搜索 |
-| 中间对话 | 每次回复包含：思考过程（模型模式）、执行过程、确认卡片、答复 | 回车发送，Shift + 回车换行；输入 `/` 选择常用任务；执行中可随时停止 |
+| 中间对话 | 每次回复包含：识别出的任务（命中场景剧本时）、思考过程（模型模式）、执行过程、确认卡片、答复 | 回车发送，Shift + 回车换行；输入 `/` 选择常用任务；执行中可随时停止 |
 | 执行过程 | 每次工具调用是一个“站点”，颜色是所属系统的标识色，换了颜色就是换到了另一个系统；完成后折叠成一条线路缩略 | 展开看参数、预览数据、错误修正提示；点结果编号在工作区打开 |
 | 确认卡片 | 写操作的变更清单、失效倒计时 | 确认提交 / 取消；确认前不会修改业务系统 |
-| 回复下方 | 复制、重新生成（仅最后一条）、有帮助 / 没帮助、用时；任务完成后给出追问建议 | 点追问建议直接发送 |
+| 回复下方 | 复制、重新生成（仅最后一条）、有帮助 / 没帮助、用时、token 用量（模型接口给了才有）；任务完成后给出追问建议 | 点追问建议直接发送 |
 | 右侧工作区 | 业务系统页面（内嵌，Agent 通过桥接操作它）、结果、工具、审计 | 拖动左边缘调宽；收起后系统页面保持连接 |
 | 结果页签 | 本对话产生的全部结果：点位预览（与车队地图同色）、分组统计、数据表 | 在车队地图显示；下载 CSV / GeoJSON；复制编号 |
 
@@ -72,8 +78,10 @@ LLM_API_KEY=sk-...
 
 ```bash
 python -m agent.check            # 校验接入清单、读取各系统 OpenAPI、列出将生成的工具（需系统已启动）
+python -m agent.evaluate         # 模型对照评测：用场景剧本的示例对照规则模式与配置的模型（需系统已启动、已配置模型）
 pip install -r requirements-dev.txt && python -m pytest -q   # 覆盖接入规则、剧本与意图识别、网关、场景、协议、会话
 curl -s -G localhost:8000/api/intents --data-urlencode "text=把北京晚班的司机分成 4 组"   # 只识别不执行：命中的场景、取出的参数
+curl -s "localhost:8000/api/intents/log?matched=false"       # 识别记录：命中率、没识别到的提问（补剧本的依据）
 cd web && npm run typecheck      # 工作台类型检查
 curl -s -X POST localhost:8000/mcp -H 'content-type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'     # 以 MCP 形式查看工具目录
@@ -97,6 +105,7 @@ agent/                Agent 服务
   manifest.py           接入清单模型与规则校验
   llm.py / rule_planner.py   OpenAI 兼容模型接入（流式）/ 规则模式（按剧本执行）
   check.py              接入检查命令
+  evaluate.py           模型对照评测命令
 web/                  工作台前端（React + Ant Design X + Vite），构建产物在 web/dist
   src/App.tsx           布局、会话、实时事件
   src/store.ts          由事件重放得到对话视图（实时与历史同一套逻辑）
@@ -107,7 +116,7 @@ systems/              三个模拟业务系统，各带 manifest.yaml、SKILL.md
   tms/                  排班系统：REST API
   dispatch/             调度系统：REST API（预览 / 提交），adapter_hooks.py 格式映射示例
 tests/                测试
-docs/                 架构说明、接入规则
+docs/                 架构说明、接入规则、路线图（ROADMAP.md）
   adr/                  架构决策记录（为什么这样设计）
   devlog/               开发日志（每次开发任务的改动、验证、遗留问题）
 ```
@@ -122,10 +131,11 @@ docs/                 架构说明、接入规则
 
 完整规则与字段说明见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)。
 
-## v0.2 的边界
+## v0.3 的边界
 
-- 单用户：未接 SSO（所有请求归属 `AGENT_DEFAULT_USER`）；系统鉴权只支持 `none` / `static_bearer`。
-- 对话保存在 `data/conversations/`（每个对话一个 JSON 文件）；确认令牌在进程内存中，服务重启后待确认的写操作作废（如实显示为中断）；结果保存 24 小时。
+- 单用户：未接 SSO（所有请求归属 `AGENT_DEFAULT_USER`）；系统鉴权只支持 `none` / `static_bearer`。浏览器来源校验防的是别的网页借用户的浏览器操作，不是身份认证：能直接访问端口的进程不受它限制，默认只监听 127.0.0.1。
+- 预览之后数据变了不提交，依赖系统在预览里返回 `etag` 并在提交时校验（接入规则 R3.7）；没有提供的系统没有这层保护。
+- 对话保存在 `data/conversations/`（每个对话一个 JSON 文件）；确认令牌在进程内存中，服务重启后待确认的写操作作废（如实显示为中断）；结果保存 24 小时，过期自动清理；审计文件按大小轮转、不自动删除。
 - 不支持编辑已发送的消息、分支对话、附件上传；“重新生成”只针对最后一条回复。
 - 界面工具只支持内嵌在工作台中的页面（内嵌模式），只能是只改界面或只读。
 - 工具超过 30 个时按关键词、识别出的意图、上一轮用过的系统路由，没有向量检索；没有程序化工具调用、长任务、子 Agent、MCP Apps、自动化兜底。

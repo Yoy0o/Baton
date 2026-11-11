@@ -61,10 +61,18 @@ export interface RenderInfo {
   title?: string;
 }
 
+/** 这次运行按场景剧本识别出的意图（run_started.intent）；没识别到为 null。 */
+export interface RunIntent {
+  id: string;
+  title: string;
+  system: string;
+}
+
 export interface Run {
   runId: string;
   text: string;
   planner: string;
+  intent: RunIntent | null;
   startedAt: number;
   placeholder?: boolean;
   steps: Step[];
@@ -78,7 +86,16 @@ export interface Run {
   confirms: ConfirmInfo[];
   renders: RenderInfo[];
   durationMs?: number;
+  /** 本次运行的 token 用量（模型接口给了才有；规则模式没有） */
+  usage?: RunUsage;
   suggestions: string[];
+}
+
+export interface RunUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  llm_calls?: number;
 }
 
 export interface ConvView {
@@ -103,6 +120,7 @@ function newRun(e: AgentEvent): Run {
     runId: String(e.run_id),
     text: String(e.text ?? ''),
     planner: String(e.planner ?? ''),
+    intent: e.intent?.id ? { id: String(e.intent.id), title: String(e.intent.title || e.intent.id), system: String(e.intent.system || '') } : null,
     startedAt: Number(e.started_at ?? Date.now() / 1000),
     steps: [],
     liveText: '',
@@ -233,6 +251,7 @@ function reduceRun(r: Run, e: AgentEvent): Run {
         ...r,
         status,
         durationMs: e.duration_ms,
+        usage: (e.usage || undefined) as RunUsage | undefined,
         suggestions: (e.suggestions || []) as string[],
         liveText: r.answer ? '' : r.liveText,
         steps: r.steps.map((s) =>

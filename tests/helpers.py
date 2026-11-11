@@ -1,10 +1,15 @@
-"""测试辅助：模拟内嵌的车队地图页面，以及不经过 WebSocket 直接驱动运行时。"""
+"""测试辅助：模拟内嵌的车队地图页面、不经过 WebSocket 直接驱动运行时、假的 OpenAI 兼容接口。"""
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+
 from agent.providers.bridge_provider import BridgeConn
+from agent.rule_planner import RulePlanner
 from agent.server import Platform
 
 CLIENT = "wb_test01"
@@ -84,3 +89,48 @@ def finished(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 async def dispatch_version(p: Platform) -> int:
     return (await p.http.get("http://localhost:8103/api/groups?region=east-china")).json()["version"]
+
+
+def fake_llm_app(planner: RulePlanner, seen: list[dict]) -> FastAPI:
+    """假的 OpenAI 兼容接口：决策仍由规则规划器完成，按请求返回 SSE 流或完整 JSON。"""
+    fake = FastAPI()
+
+    @fake.post("/v1/chat/completions")
+    async def completions(request: Request):
+        body = await request.json()
+        seen.append(body)
+        assert request.headers["authorization"] == "Bearer sk-test"
+        assert body["model"] == "fake-model" and body["tool_choice"] == "auto"
+        for t in body["tools"]:
+            assert t["type"] == "function" and set(t["function"]) == {"name", "description", "parameters"}
+        assert body["messages"][0]["role"] == "system"
+        for i, m in enumerate(body["messages"]):
+            if m["role"] == "tool":  # 工具结果必须对应前面 assistant 消息里声明的调用
+                prev = [x for x in body["messages"][:i] if x["role"] == "assistant" and x.get("tool_calls")][-1]
+                assert m["tool_call_id"] in {c["id"] for c in prev["tool_calls"]}
+                json.loads(m["content"])
+            assert "reasoning" not in m and "suggestions" not in m
+        msg = await planner.complete(body["messages"], body["tools"])
+        msg.pop("suggestions", None)
+        if not body.get("stream"):
+            return {"id": "x", "object": "chat.completion", "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}]}
+
+        def sse():
+            def chunk(delta):
+                return "data: " + json.dumps({"choices": [{"index": 0, "delta": delta}]}, ensure_ascii=False) + "\n\n"
+
+            yield chunk({"role": "assistant", "reasoning_content": "先想一想。"})
+            text = msg.get("content") or ""
+            for i in range(0, len(text), 5):
+                yield chunk({"content": text[i : i + 5]})
+            for idx, tc in enumerate(msg.get("tool_calls") or []):
+                args = tc["function"]["arguments"]
+                half = len(args) // 2
+                yield chunk({"tool_calls": [{"index": idx, "id": tc["id"], "type": "function",
+                                             "function": {"name": tc["function"]["name"], "arguments": args[:half]}}]})
+                yield chunk({"tool_calls": [{"index": idx, "function": {"arguments": args[half:]}}]})
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse(), media_type="text/event-stream")
+
+    return fake

@@ -1,6 +1,6 @@
-# Baton v0.2 架构
+# Baton v0.3 架构
 
-Baton 的目标是把设计文档 v0.1 的主干跑通：**Agent 只做编排，所有系统能力经能力网关统一成工具**；系统后端零改动接入，界面能力用一个 SDK 暴露，写操作必须预览并由用户确认。v0.2 在 v0.1 的基础上重做了工作台，并补齐常规 Agent 工作台需要的对话保存、流式输出、停止、重新生成、断线恢复。
+Baton 的目标是把设计文档 v0.1 的主干跑通：**Agent 只做编排，所有系统能力经能力网关统一成工具**；系统后端零改动接入，界面能力用一个 SDK 暴露，写操作必须预览并由用户确认。v0.2 在 v0.1 的基础上重做了工作台，并补齐常规 Agent 工作台需要的对话保存、流式输出、停止、重新生成、断线恢复。v0.3 把编排改为场景剧本驱动，并加固了确认通道、写入一致性、模型调用和数据留存。接下来的方向见 [ROADMAP](ROADMAP.md)。
 
 下面按“组件 → 一次请求 → 关键机制 → 工作台 → 配置 → 与设计文档的对应”说明。
 
@@ -13,7 +13,7 @@ Baton 的目标是把设计文档 v0.1 的主干跑通：**Agent 只做编排，
 │    └─ iframe：车队地图页面（systems/fleet/static/map.html）+ agent-bridge.js
 │                      │ WebSocket /ws/bridge?system&client（注册界面工具、执行调用、上报界面状态）
 │ WebSocket /ws/workbench?client（用户消息、停止、重新生成、确认决定 ↔ 运行事件）
-│ REST /api/*（配置、对话、结果、工具目录、审计、反馈、场景识别调试、用户直接调用界面工具）
+│ REST /api/*（配置、对话、结果、工具目录、审计、反馈、场景识别调试与识别记录、用户直接调用界面工具）
 ▼
 Agent 服务（agent/，FastAPI，端口 8000）
 ├─ 运行时 runtime.py        编排循环、停止 / 重新生成、确认等待、事件推送
@@ -27,9 +27,10 @@ Agent 服务（agent/，FastAPI，端口 8000）
 │   ├─ 前端桥接   providers/bridge_provider.py    页面注册的界面工具 → WebSocket 调用
 │   └─ 内置能力   providers/builtin_provider.py   分组 · 画布展示 · 结果查看与统计
 ├─ 结果仓库 results.py       result_id 句柄、类型识别、格式转换（data/results/）
-├─ 审计 audit.py             data/audit.jsonl
+├─ 审计 audit.py             data/audit.jsonl（启动时读回最近 500 条；按大小轮转，不删除）
+├─ 识别记录 intent_log.py    data/intents.jsonl：每次运行识别成了哪个场景，或没识别到（补剧本的依据）
 └─ /mcp                      MCP 调试端点（tools/list、tools/call 子集）
-▼ HTTP（X-Agent-User / X-Agent-Session / X-Request-Id / Idempotency-Key）
+▼ HTTP（X-Agent-User / X-Agent-Session / X-Request-Id / Idempotency-Key / If-Match）
 业务系统（systems/，各自独立进程）
 ├─ 车队追踪地图台 :8101    REST API + 地图页面
 ├─ 排班系统 :8102          REST API
@@ -62,7 +63,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 6. `analytics__run_grouping(points="res_B", groups=5, max_size=8)`：内置分组 → `res_C`（`group_plan`）。
 7. 同一轮并行调用两个展示工具：`fleet__show_result_layer` 经桥接 WebSocket 发到本窗口的地图页面，页面调用自己的 `addTempLayer` 叠加分组；`canvas__show` 发出 `render` 事件，工作台在“结果”页签展示分组。工作台的规则：这一轮操作了系统页面时，停留在系统页签，“结果”页签只亮提示点。
 8. `dispatch__preview_regroup(region, groups="res_C")`：网关把 `res_C` 转成分组列表，经 `adapter_hooks` 映射成调度系统的字段，调用预览接口；成功后网关签发 `confirm_token`，并保存这次预览的参数。
-9. `dispatch__apply_regroup(confirm_token)`：网关核对令牌（存在、未过期、属于本对话、工具匹配），通过运行时向工作台发 `confirm_request`（含变更清单）并等待。用户点“确认提交”后，网关**回放预览时保存的参数**调用提交接口，`Idempotency-Key` 为该令牌。
+9. `dispatch__apply_regroup(confirm_token)`：网关核对令牌（存在、未过期、属于本对话、工具匹配），通过运行时向工作台发 `confirm_request`（含变更清单）并等待。用户点“确认提交”后，网关**回放预览时保存的参数**调用提交接口，`Idempotency-Key` 为该令牌，`If-Match` 为预览时调度系统给出的分组版本（期间分组被别人改过则提交被拒，返回 `PREVIEW_STALE`）。
 10. 模型给出最终答复（`message`），运行结束（`run_finished`，规则模式附带追问建议）。每次工具调用都已写入审计日志；需要重放的事件已写入对话文件。
 
 ## 3. 关键机制
@@ -90,15 +91,17 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - API 返回的列表自动识别：GeoJSON → `feature_collection`；含 `lng`/`lat` 的记录 → 转为点要素；其他列表 → `table`；小对象直接内联，大对象存为 `object`。
 - 参数通过清单 `accepts_result` 接收 `result_id`，网关负责转换（`ids` / `rows` / `geojson` / `group_plan`）。
 - 浏览器端（地图页面、工作台“结果”页签）通过 `GET /api/results/{id}?format=geojson|rows|full` 读取完整数据。
-- 结果默认保存 24 小时（内存 + `data/results/*.json`）。
+- 结果默认保存 24 小时（内存 + `data/results/*.json`）。服务启动时读回未过期的结果，重启后结果引用和“本对话已有结果”照常可用；过期的结果从内存和磁盘清掉（启动时，以及之后写入新结果时顺带清理，最多每 10 分钟一次）。
 
 ### 3.3 写操作：预览 → 确认 → 提交（gateway.py）
 
 - 清单把写操作拆成两个工具：预览（`risk: read` + `pairs_with`）与提交（`risk: write|critical`）。
 - 提交工具的参数只有 `confirm_token`；令牌由**网关**在预览成功后签发，绑定对话、10 分钟有效，并保存预览时的完整参数。模型无法伪造令牌，也无法在预览之后改参数。
 - 确认由运行时强制：网关调用 `ctx.confirm(entry)`，运行时向工作台推送确认卡片并等待用户决定；无确认通道（如 `/mcp`）时直接拒绝写入。工作台的直接操作接口 `/api/ui-actions` 只接受界面工具（只改界面或只读）。
+- 确认通道只对工作台页面开放（ADR-0012）：WebSocket 握手和会改状态的 HTTP 请求带了 `Origin` 且不在允许列表（`AGENT_PUBLIC_URL`、各系统清单里的地址、`AGENT_ALLOWED_ORIGINS`）时被拒绝，别的网页不能借用户的浏览器发起任务或代点确认。不带 `Origin` 的非浏览器客户端不受影响。
 - 用户点确认之后的提交不会被“停止”打断（`asyncio.shield`）：停止只取消等待中的部分；已确认的提交完成后照常写审计，并注明“任务停止后完成”。
-- 提交成功后令牌标记为已使用；重复调用返回第一次的结果，并带 `Idempotency-Key` 防止系统侧重复执行。
+- 提交成功后令牌标记为已使用；重复调用返回第一次的结果，并带 `Idempotency-Key` 防止系统侧重复执行。令牌过期一小时后从内存清理。
+- 预览之后数据变了不提交（ADR-0013，R3.7）：预览返回值里的 `etag`（数据版本）由网关存进令牌，不进模型上下文；提交时以 `If-Match` 带回。系统答复 409 / 412 时网关返回 `PREVIEW_STALE` 并作废令牌，必须重新预览、重新确认。预览不给 `etag` 的系统没有这层保护。
 
 ### 3.4 前端桥接协议（/ws/bridge）
 
@@ -110,7 +113,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 页面 → 中心  {"type":"view_state","state":{…}}          // ≤ 2KB
 ```
 
-- 连接参数：`system`、`client`（工作台窗口 ID，内嵌时由 URL 参数 `agent_client` 传入；旧参数名 `agent_session` 仍兼容）、`page`。
+- 连接参数：`system`、`client`（工作台窗口 ID，内嵌时由 URL 参数 `agent_client` 传入；旧参数名 `agent_session` 仍兼容）、`page`。页面所在的源须在允许列表里（R5.8），否则握手被拒绝。
 - 注册时按清单白名单过滤；风险等级以清单为准；工具显示名以清单 `title` 为准，其次是页面注册时的 `title`。
 - 页面断开时工具自动下线，未完成的调用返回 `UI_DISCONNECTED`；连接变化以 `bridge_status` 推给所有工作台窗口。
 - 调用超时 20 秒（`AGENT_UI_CALL_TIMEOUT_S`）。
@@ -134,7 +137,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | --- | --- | --- |
 | `hello` | 连接建立，附当前桥接状态 | 否 |
 | `conversation_created` | 新对话的 ID、标题、时间 | 否 |
-| `run_started` / `run_finished` / `run_error` | 一次运行的开始（附识别出的意图 `intent: {id, title, system, score}`，没识别到为 `null`）、结束（`completed` / `stopped` / `error` / `interrupted`，附追问建议）、失败 | 是 |
+| `run_started` / `run_finished` / `run_error` | 一次运行的开始（附识别出的意图 `intent: {id, title, system, score}`，没识别到为 `null`）、结束（`completed` / `stopped` / `error` / `interrupted`，附追问建议；模型接口给了用量时附 `usage: {prompt_tokens, completion_tokens, total_tokens, llm_calls}`，为本次运行各轮之和）、失败 | 是 |
 | `text_delta` / `reasoning_delta` | 逐字输出的答复 / 思考过程 | 否（由 `thought`、`message` 保存最终文本） |
 | `thought` | 模型在调用工具前说的话及思考过程 | 是 |
 | `tool_call_started` / `tool_call_finished` | 每次工具调用：标题、所属系统及其标识色、类型、风险、参数、结果摘要、错误、耗时 | 是 |
@@ -163,9 +166,10 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - **识别**（`IntentLibrary.classify`）：排除命中 `none` 的，要求 `all` 全中、`any` 至少中一个、`match.slots` 都取到值；按（优先级，命中项数）排序。槽位按类型提取（`slots.py`：日期、数量、时长、区域、ID、指派……），`from_call` 让追问沿用上一轮的参数。每次运行开始时识别一次，出错时当作没识别到。
 - **规则模式**：未配置模型时，`RulePlanner` 只做“识别 → 按剧本推进一步”（`playbook.PlaybookRunner`）：每次被调用时从消息历史推导本轮做到哪一步（`transcript.py`），产出下一组工具调用或最终答复，最终答复按字逐段推送并附追问建议。它与真实模型走同一条链路（运行时、网关、适配器、桥接、确认、审计），所以也能藏在假的 OpenAI 兼容接口后面驱动测试。识别不到时返回由剧本自动生成的帮助文本。
 - **模型模式**：识别结果写进系统提示词的“本轮任务识别”一节（意图、已取出的参数、建议步骤、未满足的前置条件、其他可能），标明仅供参考；识别不到时不加这一节。
-- **路由与工作台**：识别出的意图引用的系统交给网关路由（`prefer`）；可单独发起的意图作为工作台“常用任务”（`/api/config` 的 `presets`）；`GET /api/intents?text=` 只识别不执行，返回命中项、槽位和给模型的提示，供接入方调试。
+- **路由与工作台**：识别出的意图引用的系统交给网关路由（`prefer`）；可单独发起的意图作为工作台“常用任务”（`/api/config` 的 `presets`）；`GET /api/intents?text=` 只识别不执行，返回命中项、槽位和给模型的提示，供接入方调试。工作台在每次回复顶部显示“识别为：场景名 · 所属系统”（来自 `run_started.intent`）。
+- **识别记录**（`intent_log.py`）：每次运行把提问（前 500 字）和识别结果追加到 `data/intents.jsonl`（与审计一样按大小轮转、不删除）。`GET /api/intents/log?limit=&matched=` 汇总最近 1000 次运行：命中率、各场景命中次数、没识别到的提问（相同的合并计数，按次数排序），用来决定给哪个场景补触发词、新写哪个场景。
 
-配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。
+配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。模型调用（`llm.py`）遇到限流、服务端错误或连接失败时按 `LLM_MAX_RETRIES` 退避重试，但已经把文字推给工作台之后不重试（重发会让文字重复），直接报错；接口返回 token 用量时累计到 `run_finished.usage`。发给模型的历史按用户消息为界从最早的一轮丢起，同时受条数（60）和估算的 token 预算（`AGENT_HISTORY_TOKENS`）限制。
 
 ### 3.8 MCP 调试端点（POST /mcp）
 
@@ -197,26 +201,32 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | `APP_NAME` / `APP_TAGLINE` | Baton / 多系统编排台 | 产品名与副标题（工作台标题、侧栏、服务名） |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | 空 | OpenAI 兼容接口；不填为规则模式 |
 | `LLM_TIMEOUT_S` / `LLM_TEMPERATURE` | 90 / 0.2 | 模型调用超时与温度 |
+| `LLM_MAX_RETRIES` | 2 | 模型接口限流（429）、服务端错误（5xx）、连接失败时的重试次数（退避 0.5、1、2…秒，遵守 `Retry-After`，上限 20 秒）；已经开始输出后不重试 |
 | `LLM_STREAM` | true | 流式输出；接口不支持时自动退回一次性返回 |
 | `RULE_STREAM_DELAY_S` | 0.012 | 规则模式模拟逐字输出的间隔，0 为不模拟 |
 | `AGENT_HOST` / `AGENT_PORT` | 127.0.0.1 / 8000 | Agent 服务监听地址 |
-| `AGENT_PUBLIC_URL` | http://localhost:8000 | 浏览器访问 Agent 的地址：下发给内嵌系统页面连接桥接中心、读取结果，并作为 CORS 允许来源 |
-| `AGENT_DATA_DIR` | ./data | 对话、结果、审计、反馈的存放目录 |
+| `AGENT_PUBLIC_URL` | http://localhost:8000 | 浏览器访问 Agent 的地址：下发给内嵌系统页面连接桥接中心、读取结果，并作为允许的浏览器来源（CORS 与来源校验）。用别的地址访问工作台时必须改它 |
+| `AGENT_ALLOWED_ORIGINS` | 空 | 额外允许的浏览器来源，逗号分隔（如前端开发时的 `http://localhost:5173`、反向代理域名）。默认已允许 `AGENT_PUBLIC_URL` 和各系统清单里的地址 |
+| `AGENT_DATA_DIR` | ./data | 对话、结果、审计、识别记录、反馈的存放目录 |
 | `AGENT_WEB_DIR` | ./web/dist | 工作台构建产物目录 |
 | `AGENT_MANIFESTS` | systems/*/manifest.yaml | 接入清单位置 |
 | `AGENT_MAX_STEPS` | 12 | 单次运行最多调用模型的轮数 |
+| `AGENT_HISTORY_TOKENS` | 24000 | 发给模型的对话历史的 token 预算（估算值，不含系统提示词和工具定义）；超出时从最早的一轮开始丢，当前这一轮整轮保留；0 为不按长度裁剪（仍有 60 条的上限） |
 | `AGENT_CONFIRM_TIMEOUT_S` | 600 | 等待用户确认的时长 |
 | `AGENT_UI_CALL_TIMEOUT_S` | 20 | 界面工具调用超时 |
 | `AGENT_HTTP_TIMEOUT_S` | 30 | 调用业务系统接口的 HTTP 超时 |
 | `AGENT_FULL_CATALOG_LIMIT` | 30 | 工具数超过该值时按关键词路由 |
-| `AGENT_RESULT_TTL_S` | 86400 | 结果保存时长 |
+| `AGENT_RESULT_TTL_S` | 86400 | 结果保存时长；过期后从内存和磁盘清理 |
+| `AGENT_AUDIT_ROTATE_MB` | 50 | 审计文件 `audit.jsonl`（识别记录 `intents.jsonl` 同样）超过这个大小时改名为 `audit-<时间>.jsonl` 留存、另起新文件；0 为不轮转。平台不删除审计文件，保留多久由运维决定 |
 | `AGENT_DEFAULT_USER` | local | 未接 SSO 时所有请求归属的用户：对话、结果、审计、`X-Agent-User` 请求头都用它 |
 | `AGENT_TZ` | Asia/Shanghai | IANA 时区名：系统提示词里的当前时间、规则模式解析“今天”“明天”都按它计算 |
 | `FLEET_URL` / `TMS_URL` / `DISPATCH_URL` | localhost:8101/8102/8103 | 模拟系统地址（清单中引用） |
 
 ## 6. 与设计文档 v0.1 的对应
 
-| 设计文档章节 | v0.2 实现 | 说明 |
+未实现部分的优先级见 [ROADMAP](ROADMAP.md) 的 P2、P3。
+
+| 设计文档章节 | 当前实现 | 说明 |
 | --- | --- | --- |
 | 2 总体架构 | 已实现 | 工作台 / 运行时 / 能力网关 / 三类能力来源 / 业务系统 |
 | 3.1 API 适配 | 已实现 | OpenAPI 白名单 + 描述重写 + 结果引用 + 钩子 |
@@ -226,15 +236,16 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | 4 Function Calling 规范 | 已实现 | 命名、信封、错误、两段式写入、关键词 + 意图 + 上一轮系统路由；向量检索与程序化调用未做 |
 | 5 结果与可视化 | 部分实现 | 结果仓库、回填原系统、工作台“结果”页签；MCP Apps 未做 |
 | 6 运行时 | 部分实现 | 单编排 Agent、意图识别与场景剧本、知识包、界面状态、模型网关、对话保存、停止与重新生成；长任务、子 Agent 未做 |
-| 7 安全与治理 | 部分实现 | 风险分级、确认、审计（区分 Agent 与用户直接操作）、令牌绑定对话；SSO、Token Exchange、角色过滤、OpenTelemetry 未做 |
+| 7 安全与治理 | 部分实现 | 风险分级、确认、审计（区分 Agent 与用户直接操作）、令牌绑定对话、浏览器来源校验、预览版本校验；SSO、Token Exchange、角色过滤、OpenTelemetry 未做 |
 
 ## 7. 扩展点
 
-- 新增场景：在系统目录写 `playbooks.yaml` 并在清单里引用，规则模式、模型提示、路由、常用任务自动生效，不改 Python；用 `/api/intents?text=` 调试。
+- 新增场景：在系统目录写 `playbooks.yaml` 并在清单里引用，规则模式、模型提示、路由、常用任务自动生效，不改 Python；用 `/api/intents?text=` 调试，用 `/api/intents/log` 看哪些提问没被识别。
 - 新增槽位类型：在 `agent/slots.py` 用 `@extractor("类型名", {参数…})` 注册。
 - 运行时扩展：提示词改 `prompt.py`；工具调度策略（并行分批）改 `executor.py`；规划前的识别与路由改 `runtime._plan_turn`。
 - 新增能力来源：在 `agent/providers/` 下实现 `specs()` 与 `call()`，在网关 `_dispatch` 中按 `kind` 分发。
 - 身份：在 `server.py` 中从 SSO 令牌解析用户替换 `default_user`；在 `openapi_provider.py` 的请求头处加入令牌交换。
 - 持久化：对话目前是 JSON 文件，确认令牌在进程内存，结果仓库是内存 + 文件；替换为 PostgreSQL / Redis 时接口不变。
+- 模型评测：`python -m agent.evaluate` 把各系统可单独发起的场景（剧本的第一个示例）分别交给规则模式和配置的模型，以规则模式的工具序列为参考，判定模型是否调到了该调的工具、是否走到写操作确认，并列出多出的调用、失败过的调用和多用的轮数。两边各用临时数据目录；确认默认自动取消。评测环境里没有内嵌的系统页面：展示步骤两边都走画布，只靠界面工具的场景（轨迹回放、定位）标为“未评测”；追问类场景（依赖上一轮结果的，如微调、同步）暂不覆盖。
 - 模型：`llm.py` 的 `LLM` 协议只要求实现 `complete(messages, tools, on_delta=None)`；规则模式的 `RulePlanner` 也只实现这一个方法。
 - 事件协议：目前为自定义事件，字段已按“运行 → 步骤 → 确认”组织；后续可映射到 AG-UI 事件模型，工作台与运行时之间的边界不变。

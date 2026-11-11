@@ -35,6 +35,7 @@ from .config import ROOT, Settings
 from .contracts import ToolError, for_model
 from .conversations import ConversationStore, make_title
 from .gateway import Gateway
+from .intent_log import IntentLog
 from .intents import IntentLibrary
 from .llm import make_llm
 from .manifest import load_manifests
@@ -57,7 +58,9 @@ class Platform:
         self.manifests = load_manifests(settings.manifests_glob)
         self.http = httpx.AsyncClient(transport=transport, timeout=settings.http_timeout_s)
         self.store = ResultStore(settings.data_dir, settings.result_ttl_s)
-        self.audit = AuditLog(settings.data_dir)
+        rotate = int(settings.audit_rotate_mb * 1024 * 1024)
+        self.audit = AuditLog(settings.data_dir, rotate_bytes=rotate, tz=settings.tzinfo)
+        self.intent_log = IntentLog(settings.data_dir, rotate_bytes=rotate, tz=settings.tzinfo)
         self.conversations = ConversationStore(settings.data_dir)
         self.clients: dict[str, WebSocket] = {}
         self._send_locks: dict[str, asyncio.Lock] = {}
@@ -66,7 +69,8 @@ class Platform:
         self.intents = IntentLibrary(self.manifests)  # 场景剧本：意图识别、规则模式执行、路由参考（ADR-0011）
         self.llm = make_llm(settings, self.http, self.intents)
         self.runtime = AgentRuntime(
-            settings, self.gateway, self.store, self.llm, self.conversations, self.send, intents=self.intents
+            settings, self.gateway, self.store, self.llm, self.conversations, self.send,
+            intents=self.intents, intent_log=self.intent_log,
         )
 
     async def send(self, client_id: str, event: dict[str, Any]) -> None:
@@ -87,15 +91,21 @@ class Platform:
             await self.send(cid, msg)
 
     def allowed_origins(self) -> list[str]:
-        origins = {self.settings.public_url.rstrip("/")}
+        """允许访问 Agent 服务的浏览器来源：工作台自身、各系统清单里的地址、AGENT_ALLOWED_ORIGINS。
+
+        同时用于 CORS 和来源校验（ADR-0012）。本机地址的 localhost / 127.0.0.1 两种写法都算。
+        """
+        origins = {o.lower() for o in self.settings.allowed_origins}
+        urls = [self.settings.public_url]
         for m in self.manifests:
-            for url in (m.base_url, m.ui_bridge.embed_url or ""):
-                parts = urlsplit(url)
-                if parts.scheme and parts.netloc:
-                    origins.add(f"{parts.scheme}://{parts.netloc}")
-                    if parts.hostname in ("localhost", "127.0.0.1"):
-                        alt = "127.0.0.1" if parts.hostname == "localhost" else "localhost"
-                        origins.add(f"{parts.scheme}://{alt}:{parts.port}" if parts.port else f"{parts.scheme}://{alt}")
+            urls += [m.base_url, m.ui_bridge.embed_url or ""]
+        for url in urls:
+            parts = urlsplit(url)
+            if parts.scheme and parts.netloc:
+                origins.add(f"{parts.scheme}://{parts.netloc}".lower())
+                if parts.hostname in ("localhost", "127.0.0.1"):
+                    alt = "127.0.0.1" if parts.hostname == "localhost" else "localhost"
+                    origins.add(f"{parts.scheme}://{alt}:{parts.port}" if parts.port else f"{parts.scheme}://{alt}")
         return sorted(origins)
 
     def conversation_meta(self, conv) -> dict[str, Any]:
@@ -105,6 +115,40 @@ class Platform:
             "running": bool(sess and sess.running),
             "pending_confirm": bool(sess and sess.pending_confirm),
         }
+
+
+class OriginGuard:
+    """浏览器来源校验（ADR-0012）：WebSocket 握手和会改状态的 HTTP 请求，带了 Origin 且不在允许列表时拒绝。
+
+    WebSocket 不受同源策略和 CORS 约束，不校验的话，用户浏览器里的任意网页都能连上工作台通道、
+    发起任务并自己回“确认”，写操作两段式（ADR-0003）就失效了。HTTP 侧同理挡住跨站表单 / text/plain 提交。
+    不带 Origin 的请求（命令行、脚本、测试）照常放行：它们不是浏览器，跨站伪造不适用。
+    """
+
+    _SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+    def __init__(self, app: Any, allowed: list[str]):
+        self.app = app
+        self.allowed = {o.rstrip("/").lower() for o in allowed}
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] in ("http", "websocket"):
+            origin = next((v.decode("latin-1") for k, v in scope.get("headers") or [] if k == b"origin"), "")
+            guarded = scope["type"] == "websocket" or scope.get("method") not in self._SAFE_METHODS
+            if guarded and origin and origin.rstrip("/").lower() not in self.allowed:
+                log.warning(
+                    "拒绝来源 %s 对 %s 的请求：不在允许列表。若这是你的工作台或系统页面地址，"
+                    "请设置 AGENT_PUBLIC_URL，或把它加入 AGENT_ALLOWED_ORIGINS",
+                    origin, scope.get("path"),
+                )
+                if scope["type"] == "websocket":
+                    await receive()  # websocket.connect
+                    await send({"type": "websocket.close", "code": 1008})  # 握手阶段拒绝，浏览器收到 403
+                else:
+                    detail = f"来源 {origin} 不在允许列表（AGENT_PUBLIC_URL / AGENT_ALLOWED_ORIGINS）"
+                    await JSONResponse({"detail": detail}, status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 class RenameBody(BaseModel):
@@ -138,12 +182,9 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
 
     app = FastAPI(title=f"{settings.app_name} {__version__}", version=__version__, lifespan=lifespan)
     app.state.platform = platform
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=platform.allowed_origins(),
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
-        allow_headers=["*"],
-    )
+    origins = platform.allowed_origins()
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["*"])
+    app.add_middleware(OriginGuard, allowed=origins)  # 后加的在最外层：先校验来源，再进 CORS 和路由
     app.mount("/sdk", StaticFiles(directory=ROOT / "sdk"), name="sdk")
     _mount_workbench(app, settings)
 
@@ -212,6 +253,11 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             out["matches"] = [{**m.brief(), "hits": m.hits, "slots": m.slots} for m in matches]
             out["hint"] = describe(lib, matches, tools)
         return out
+
+    @app.get("/api/intents/log")
+    async def intents_log(limit: int = Query(100, ge=1, le=1000), matched: bool | None = Query(None)) -> dict[str, Any]:
+        """最近运行的识别情况：命中率、各场景命中次数、没识别到的提问（补剧本的依据）。matched 过滤 entries。"""
+        return platform.intent_log.report(user, limit=limit, matched=matched)
 
     @app.get("/api/tools")
     async def tools(client: str = Query("", max_length=64), session: str = Query("", max_length=64)) -> dict[str, Any]:

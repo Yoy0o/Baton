@@ -4,7 +4,9 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from agent.server import create_app
 
@@ -174,3 +176,56 @@ def test_mcp_endpoint(settings, transport):
         denied = c.post("/mcp", json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "dispatch__apply_regroup", "arguments": {"confirm_token": "cf_x"}}}).json()
         assert denied["result"]["isError"] is True
         assert c.post("/mcp", json={"jsonrpc": "2.0", "id": 5, "method": "nope"}).json()["error"]["code"] == -32601
+
+
+def test_foreign_origin_is_rejected(settings, transport):
+    """浏览器里的其他网页不能连工作台 / 桥接通道，也不能跨站提交（ADR-0012）：否则它能发起任务并自己点“确认”。"""
+    settings.allowed_origins = ["http://localhost:5173"]  # 前端开发服务器
+    evil = {"Origin": "http://evil.example"}
+    with _client(settings, transport) as c:
+        for path in (f"/ws/workbench?client={CLIENT}", f"/ws/bridge?system=fleet&client={CLIENT}"):
+            with pytest.raises(WebSocketDisconnect) as denied:
+                with c.websocket_connect(path, headers=evil):
+                    pass
+            assert denied.value.code == 1008
+        # 工作台自身（localhost / 127.0.0.1 两种写法）、清单里的系统地址、额外配置的来源照常可用
+        for origin in ("http://localhost:8000", "http://127.0.0.1:8000", "http://localhost:5173"):
+            with c.websocket_connect(f"/ws/workbench?client={CLIENT}", headers={"Origin": origin}) as wb:
+                assert wb.receive_json()["type"] == "hello"
+        with c.websocket_connect(f"/ws/bridge?system=fleet&client={CLIENT}", headers={"Origin": "http://localhost:8101"}) as page:
+            page.send_json({"type": "ping"})
+            assert page.receive_json()["type"] == "pong"
+
+        # 会改状态的 HTTP 请求同样校验；text/plain 不触发预检，只靠 CORS 挡不住
+        rpc = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+        blocked = c.post("/mcp", content=rpc, headers={**evil, "content-type": "text/plain"})
+        assert blocked.status_code == 403 and "AGENT_ALLOWED_ORIGINS" in blocked.json()["detail"]
+        assert c.post("/mcp", content=rpc, headers={"Origin": "http://localhost:8000"}).status_code == 200
+        assert c.post("/mcp", content=rpc).status_code == 200  # 不带 Origin：命令行、脚本
+        # 只读请求不拦（跨站读不到响应，由 CORS 负责）
+        assert c.get("/api/config", headers=evil).status_code == 200
+
+
+def test_intent_log_reports_unmatched_requests(settings, transport):
+    """每次运行的识别结果落盘；接口汇总命中率和没识别到的提问（补剧本的依据），重启后仍在。"""
+
+    def say(wb, text: str) -> None:
+        wb.send_json({"type": "user_message", "conversation_id": None, "text": text})
+        _run_until_finished(wb, approve=False)
+
+    with _client(settings, transport) as c:
+        with c.websocket_connect(f"/ws/workbench?client={CLIENT}") as wb:
+            assert wb.receive_json()["type"] == "hello"
+            say(wb, "在地图上显示过去 24 小时停留超过 2 小时的挂车，按客户着色")
+            say(wb, "重新编排一下班组")
+            say(wb, "重新编排一下班组")
+            say(wb, "今天天气怎么样")
+        report = c.get("/api/intents/log").json()
+        assert report["stats"] == {"runs": 4, "matched": 1, "unmatched": 3, "match_rate": 0.25}
+        assert report["by_intent"] == [{"id": "stops", "title": "挂车停留地图", "system": "fleet", "count": 1}]
+        assert [(u["text"], u["count"]) for u in report["unmatched"]] == [("重新编排一下班组", 2), ("今天天气怎么样", 1)]
+        assert report["entries"][0]["text"] == "今天天气怎么样" and report["entries"][0]["intent"] is None
+        only_hit = c.get("/api/intents/log", params={"matched": "true"}).json()["entries"]
+        assert [e["intent"]["id"] for e in only_hit] == ["stops"] and only_hit[0]["run_id"].startswith("run_")
+    with _client(settings, transport) as c:  # 同一个数据目录，相当于重启
+        assert c.get("/api/intents/log").json()["stats"]["runs"] == 4

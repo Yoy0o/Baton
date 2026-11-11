@@ -22,6 +22,12 @@ export function formatDuration(ms?: number): string {
   return `${m} 分 ${Math.round(s - m * 60)} 秒`;
 }
 
+/** token 数量：1234 → 1.2k */
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  return `${n < 10000 ? (n / 1000).toFixed(1) : Math.round(n / 1000)}k`;
+}
+
 export function formatClock(ts: number): string {
   const d = new Date(ts * 1000);
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });

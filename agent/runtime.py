@@ -32,18 +32,19 @@ from .conversations import (
 )
 from .executor import ToolExecutor
 from .gateway import Gateway, PendingConfirm
+from .intent_log import IntentLog
 from .intents import IntentLibrary, IntentMatch
 from .llm import LLM, LLMError
 from .playbook import describe
 from .prompt import PromptBuilder
 from .providers import CallContext
 from .results import ResultStore
-from .transcript import Transcript
+from .transcript import Transcript, estimate_tokens
 
 log = logging.getLogger("agent.runtime")
 
 Send = Callable[[str, dict[str, Any]], Awaitable[None]]
-_HISTORY_LIMIT = 60  # 发给模型的历史消息条数上限（按用户消息边界裁剪）
+_HISTORY_LIMIT = 60  # 发给模型的历史消息条数上限（按用户消息边界裁剪）；长度另按 AGENT_HISTORY_TOKENS 裁剪
 _SAVE_ON = {"run_started", "confirm_request", "confirm_resolved"}
 
 
@@ -93,6 +94,7 @@ class AgentRuntime:
         conversations: ConversationStore,
         send: Send,
         intents: IntentLibrary | None = None,
+        intent_log: IntentLog | None = None,
     ):
         self.s = settings
         self.gw = gateway
@@ -101,6 +103,7 @@ class AgentRuntime:
         self.conversations = conversations
         self.send = send
         self.intents = intents if intents is not None else IntentLibrary(gateway.manifests.values())
+        self.intent_log = intent_log  # 每次运行的识别结果落盘，供补剧本参考；不给时不记
         self.prompts = PromptBuilder(settings, gateway, store)
         self.executor = ToolExecutor(gateway)
         self.sessions: dict[str, Session] = {}
@@ -188,6 +191,7 @@ class AgentRuntime:
         conv = sess.conv
         t0 = time.perf_counter()
         steps, status, suggestions = 0, "completed", []
+        usage: dict[str, int] = {}  # 本次运行各轮模型调用的 token 用量之和（接口给了才有）
         partial: list[str] = []  # 当前这一步已流式输出的文字（停止时保留）
 
         async def emit(event: dict[str, Any]) -> None:
@@ -204,6 +208,10 @@ class AgentRuntime:
         try:
             conv.history.append({"role": "user", "content": text})
             turn = self._plan_turn(conv, text)
+            if self.intent_log is not None:
+                self.intent_log.record(
+                    user=conv.user, conversation_id=conv.id, run_id=run_id, planner=self.llm.label, text=text, intent=turn.intent
+                )
             await emit(
                 {"type": "run_started", "text": text, "planner": self.llm.label, "intent": turn.intent, "started_at": time.time()}
             )
@@ -220,6 +228,7 @@ class AgentRuntime:
                     await emit({"type": "reasoning_delta" if kind == "reasoning" else "text_delta", "delta": piece})
 
                 reply = await self.llm.complete(self._messages(sess, turn), [s.to_openai() for s in turn.specs], on_delta=on_delta)
+                _add_usage(usage, reply.get("usage"))
                 reasoning = reply.get("reasoning") or "".join(thinking)
                 calls = reply.get("tool_calls") or []
                 content = (reply.get("content") or "").strip()
@@ -273,6 +282,7 @@ class AgentRuntime:
                         "steps": steps,
                         "duration_ms": round((time.perf_counter() - t0) * 1000),
                         "suggestions": suggestions if status == "completed" else [],
+                        **({"usage": usage} if usage else {}),
                     }
                 )
             finally:
@@ -335,14 +345,31 @@ class AgentRuntime:
         system = self.prompts.build(
             session_id=sess.conv.id, client_id=sess.client_id, user=sess.conv.user, specs=turn.specs, intent_hint=hint
         )
-        return [{"role": "system", "content": system}] + self._trimmed(sess.conv.history)
+        return [{"role": "system", "content": system}] + self._trimmed(sess.conv.history, self.s.history_tokens)
 
     @staticmethod
-    def _trimmed(hist: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if len(hist) <= _HISTORY_LIMIT:
+    def _trimmed(hist: list[dict[str, Any]], token_budget: int = 0) -> list[dict[str, Any]]:
+        """发给模型的历史：从最早的一轮开始丢，直到条数和估算的 token 都在限度内。
+
+        只在用户消息处下刀（工具调用和它的结果不能拆开）；当前这一轮即使超出预算也整轮保留。
+        """
+
+        def fits(part: list[dict[str, Any]]) -> bool:
+            return len(part) <= _HISTORY_LIMIT and (token_budget <= 0 or estimate_tokens(part) <= token_budget)
+
+        if fits(hist):
             return list(hist)
         starts = [i for i, m in enumerate(hist) if m.get("role") == "user"]
         for i in starts:
-            if len(hist) - i <= _HISTORY_LIMIT:
+            if fits(hist[i:]):
                 return hist[i:]
         return hist[starts[-1]:] if starts else hist[-_HISTORY_LIMIT:]
+
+
+def _add_usage(total: dict[str, int], usage: Any) -> None:
+    if not isinstance(usage, dict):
+        return
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        if isinstance(usage.get(key), int):
+            total[key] = total.get(key, 0) + usage[key]
+    total["llm_calls"] = total.get("llm_calls", 0) + 1

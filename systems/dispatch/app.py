@@ -1,6 +1,7 @@
 """模拟系统：调度系统（司机组管理）。
 
-写操作按接入规则实现：预览（不落库）+ 提交（落库）成对接口，请求体一致；提交支持 Idempotency-Key。
+写操作按接入规则实现：预览（不落库）+ 提交（落库）成对接口，请求体一致；提交支持 Idempotency-Key（R3.4）。
+预览返回 etag（区域当前的分组版本），提交带 If-Match 时版本不一致就返回 409，不落库（R3.7）。
 """
 from __future__ import annotations
 
@@ -86,6 +87,11 @@ def _diff(req: RegroupRequest, st: dict) -> tuple[list[dict], int, int]:
     return changes, unchanged, untouched
 
 
+def _etag(region: str, st: dict) -> str:
+    """数据版本标识：预览时给出，提交时由平台用 If-Match 带回（R3.7）。"""
+    return f"{region}-v{st['version']}"
+
+
 @app.get("/api/groups", operation_id="listGroups", summary="查询区域当前的司机组划分")
 def list_groups(region: str = Query(..., description="区域编码，如 east-china")) -> dict:
     st = _state.get(region)
@@ -115,18 +121,25 @@ def preview_regroup(req: RegroupRequest) -> dict:
     return {
         "summary": summary,
         "changes": changes,
+        "etag": _etag(req.region, st),
         "stats": {"moved": len(changes), "unchanged": unchanged, "untouched": untouched, "base_version": st["version"]},
     }
 
 
 @app.post("/api/groups/apply", operation_id="applyRegroup", summary="提交分组调整（落库）")
-def apply_regroup(req: RegroupRequest, idempotency_key: str | None = Header(None, alias="Idempotency-Key")) -> dict:
+def apply_regroup(
+    req: RegroupRequest,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    if_match: str | None = Header(None, alias="If-Match"),
+) -> dict:
     if not idempotency_key:
         raise HTTPException(400, "提交需要 Idempotency-Key 请求头")
     with _lock:
         if idempotency_key in _idempotent:
             return {**_idempotent[idempotency_key], "replayed": True}
         st = _check(req)
+        if if_match and if_match != _etag(req.region, st):
+            raise HTTPException(409, f"{req.region} 的分组在预览之后已被修改（当前版本 {st['version']}），请重新预览")
         changes, _, _ = _diff(req, st)
         for g in req.groups:
             for did in g.driver_ids:

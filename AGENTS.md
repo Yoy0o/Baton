@@ -1,10 +1,10 @@
 # AGENTS.md
 
-给在本仓库工作的编码 Agent 看的速查。产品说明见 [README.md](README.md)，完整架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，系统接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，设计理由见 [docs/adr/](docs/adr/README.md)；这里不重复，只写动手前必须知道的事。任务结束前按“完成前检查”和“文档与留痕”两节收尾。
+给在本仓库工作的编码 Agent 看的速查。产品说明见 [README.md](README.md)，完整架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，系统接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，设计理由见 [docs/adr/](docs/adr/README.md)，接下来做什么见 [docs/ROADMAP.md](docs/ROADMAP.md)；这里不重复，只写动手前必须知道的事。任务结束前按“完成前检查”和“文档与留痕”两节收尾。
 
 ## 项目是什么
 
-Baton：通用 Agent 通过**能力网关**调度多个操作类 Web 系统。Agent 只做编排，所有系统能力统一成工具；后端零改动接入（OpenAPI + 接入清单），界面能力用桥接 SDK 暴露，写操作必须“预览 → 用户确认 → 提交”。当前版本 v0.2，单用户版。
+Baton：通用 Agent 通过**能力网关**调度多个操作类 Web 系统。Agent 只做编排，所有系统能力统一成工具；后端零改动接入（OpenAPI + 接入清单），界面能力用桥接 SDK 暴露，写操作必须“预览 → 用户确认 → 提交”。当前版本 v0.3，单用户版。
 
 ## 架构一图
 
@@ -17,8 +17,9 @@ agent/ Agent 服务 (FastAPI :8000)
    intents.py 场景剧本模型·意图识别·R11 校验   slots.py 槽位类型   playbook.py 剧本执行器（规则模式）·给模型的提示
    transcript.py 消息历史解析       gateway.py 目录·校验·风险·confirm_token·重复失败拦截·审计
    providers/ openapi（API）· bridge（界面）· builtin（分组/画布/结果）   conversations.py 对话 JSON 与事件重放
-   results.py 结果仓库(result_id)   audit.py 审计   llm.py / rule_planner.py 模型 / 规则模式（只调剧本，不写场景）
+   results.py 结果仓库(result_id)   audit.py 审计   intent_log.py 识别记录   llm.py / rule_planner.py 模型 / 规则模式（只调剧本，不写场景）
    manifest.py 清单模型与规则校验   check.py 接入检查命令   analytics.py 带人数上限的空间分组
+   evaluate.py 模型对照评测命令（规则模式的工具序列作参考）
 systems/  三个模拟业务系统 fleet:8101 · tms:8102 · dispatch:8103，各带 manifest.yaml + SKILL.md，fleet/dispatch 带 playbooks.yaml；样例数据在 _sample_data.py
 ```
 
@@ -32,19 +33,20 @@ python run.py                       # 起三个模拟系统 + Agent，http://loc
 python -m pytest -q                 # 全部测试，不占端口（ASGI transport），不依赖前端构建
 ruff check .                        # 代码检查（配置在 pyproject.toml）；ruff check . --fix 自动修复导入顺序等
 python -m agent.check [manifest.yaml] -v   # 校验接入清单，需系统已启动
+python -m agent.evaluate [--only id,…]     # 模型对照评测：场景剧本示例对照规则模式与配置的模型，需系统已启动、已配置 LLM_*
 cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 生成 web/dist；npm run dev 联调（代理到 8000）
 ```
 
 - 环境：Python ≥ 3.10；Node.js 20.19 / 22.12 及以上（只有改前端时需要）。
 - Windows 下 `python` 可能是 Store 占位符，用 `py -m pytest -q`、`py -m ruff check .`。
-- 未配置 `LLM_*` 即为规则模式（`rule_planner.py` 按各系统 `playbooks.yaml` 执行，走同一条链路）。`GET /api/intents?text=…` 只识别不执行，调试剧本用。
+- 未配置 `LLM_*` 即为规则模式（`rule_planner.py` 按各系统 `playbooks.yaml` 执行，走同一条链路）。`GET /api/intents?text=…` 只识别不执行，调试剧本用；`GET /api/intents/log` 看最近运行里没识别到的提问。
 
 ## 不能破坏的约束
 
 每条的理由和放弃的方案见对应 ADR。确实需要放宽时，先写新的 ADR 讨论，不要在实现里顺手改。
 
 1. **所有工具调用经 `Gateway.call()`**（[ADR-0002](docs/adr/0002-gateway-single-entry.md)）。不要在运行时、server 或 provider 里绕过网关直连业务系统；网关不抛异常，一律返回带 `fix_hint` 的错误信封（`contracts.py`）。
-2. **写操作两段式**（[ADR-0003](docs/adr/0003-two-phase-write.md)）。提交工具只收 `confirm_token`，令牌由网关在预览成功后签发、绑定对话、10 分钟有效，并回放预览时保存的参数；确认只能由运行时的 `ctx.confirm` 通道产生。`/mcp` 与 `/api/ui-actions` 没有确认通道，不得放开写入。用户确认后的提交用 `asyncio.shield` 保护，不被“停止”打断。
+2. **写操作两段式**（[ADR-0003](docs/adr/0003-two-phase-write.md)）。提交工具只收 `confirm_token`，令牌由网关在预览成功后签发、绑定对话、10 分钟有效，并回放预览时保存的参数；确认只能由运行时的 `ctx.confirm` 通道产生。`/mcp` 与 `/api/ui-actions` 没有确认通道，不得放开写入。用户确认后的提交用 `asyncio.shield` 保护，不被“停止”打断。确认通道只对工作台页面开放：WebSocket 握手和会改状态的 HTTP 请求由 `server.OriginGuard` 校验浏览器来源（[ADR-0012](docs/adr/0012-browser-origin-check.md)），新增入口不要绕开这层中间件。
 3. **大数据走引用**（[ADR-0004](docs/adr/0004-result-references.md)）。不要把整份列表放进模型上下文；新增参数需要接收上一步结果时用清单 `accepts_result`，转换在网关做。
 4. **界面工具只能是 `view` / `read`**（[ADR-0005](docs/adr/0005-ui-tools-view-read-only.md)），业务写入只走 API 预览/提交。工具必须在清单 `ui_bridge.tools` 白名单中。
 5. **坐标统一 WGS84**（[ADR-0006](docs/adr/0006-wgs84-coordinates.md)），GeoJSON 顺序 [经度, 纬度]；系统内部的其他坐标系在钩子或系统接口内转换。
@@ -65,7 +67,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 | 新增内置工具 | `providers/builtin_provider.py` |
 | 改桥接 SDK / 桥接协议 | `sdk/agent-bridge.js`（纯 JS，无需构建）+ `providers/bridge_provider.py`；参考实现是 `systems/fleet/static/map.html` 末尾；同步 ARCHITECTURE 3.4 与 INTEGRATION_RULES 第 5 节 |
 | 新增 / 改 REST 或 WS 接口 | `agent/server.py`；前端调用在 `web/src/api.ts`、`web/src/socket.ts`；同步 ARCHITECTURE 第 1 节和 3.5 节 |
-| 换模型接口 | `llm.py`，只需满足 `complete(messages, tools, on_delta=None)` |
+| 换模型接口 | `llm.py`，只需满足 `complete(messages, tools, on_delta=None)`；换了模型或改了提示词后跑 `python -m agent.evaluate`，结果记进开发日志 |
 | 改样例数据或场景剧本 | `systems/_sample_data.py`、`systems/*/playbooks.yaml`；README“验证清单”里的数字和 `tests/test_scenarios.py` 依赖它们，一并核对 |
 | 新增配置项 | `agent/config.py` 的 `Settings` + `.env.example` + ARCHITECTURE 第 5 节 |
 | 工作台界面 | `web/src/components/`；视觉约定在 `web/src/theme.ts`（琥珀色只表示写操作/确认，系统标识色避开琥珀、绿、红）；改完重建 `web/dist` |
@@ -106,6 +108,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 | 组件、请求链路、事件协议、配置项 | ARCHITECTURE 对应章节（配置是第 5 节，事件是 3.5 节） |
 | 接入规则、清单字段、剧本字段 | INTEGRATION_RULES |
 | 启动方式、验证清单、版本边界 | README |
+| 后续方向、优先级、条目状态（开始做、做完、新发现的问题） | [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Agent 的工作约定本身 | 本文件 |
 
 规则：已发布版本的 CHANGELOG 条目和已采纳 ADR 的正文不改，只追加；开发日志只追加，发现写错在文末补“更正”。
