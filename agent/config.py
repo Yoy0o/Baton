@@ -25,6 +25,10 @@ class Settings:
     port: int = field(default_factory=lambda: int(_env("AGENT_PORT", "8000")))
     # 浏览器访问 Agent 服务的地址：内嵌系统页面用它连接桥接中心、读取结果
     public_url: str = field(default_factory=lambda: _env("AGENT_PUBLIC_URL", "http://localhost:8000"))
+    # 额外允许的浏览器来源（逗号分隔，如前端开发时的 http://localhost:5173）。默认只允许 public_url 和各系统清单里的地址（ADR-0012）
+    allowed_origins: list[str] = field(
+        default_factory=lambda: [o.strip().rstrip("/") for o in _env("AGENT_ALLOWED_ORIGINS").split(",") if o.strip()]
+    )
     manifests_glob: str = field(
         default_factory=lambda: _env("AGENT_MANIFESTS", str(ROOT / "systems" / "*" / "manifest.yaml"))
     )

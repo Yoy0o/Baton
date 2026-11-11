@@ -97,6 +97,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - 清单把写操作拆成两个工具：预览（`risk: read` + `pairs_with`）与提交（`risk: write|critical`）。
 - 提交工具的参数只有 `confirm_token`；令牌由**网关**在预览成功后签发，绑定对话、10 分钟有效，并保存预览时的完整参数。模型无法伪造令牌，也无法在预览之后改参数。
 - 确认由运行时强制：网关调用 `ctx.confirm(entry)`，运行时向工作台推送确认卡片并等待用户决定；无确认通道（如 `/mcp`）时直接拒绝写入。工作台的直接操作接口 `/api/ui-actions` 只接受界面工具（只改界面或只读）。
+- 确认通道只对工作台页面开放（ADR-0012）：WebSocket 握手和会改状态的 HTTP 请求带了 `Origin` 且不在允许列表（`AGENT_PUBLIC_URL`、各系统清单里的地址、`AGENT_ALLOWED_ORIGINS`）时被拒绝，别的网页不能借用户的浏览器发起任务或代点确认。不带 `Origin` 的非浏览器客户端不受影响。
 - 用户点确认之后的提交不会被“停止”打断（`asyncio.shield`）：停止只取消等待中的部分；已确认的提交完成后照常写审计，并注明“任务停止后完成”。
 - 提交成功后令牌标记为已使用；重复调用返回第一次的结果，并带 `Idempotency-Key` 防止系统侧重复执行。
 
@@ -110,7 +111,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 页面 → 中心  {"type":"view_state","state":{…}}          // ≤ 2KB
 ```
 
-- 连接参数：`system`、`client`（工作台窗口 ID，内嵌时由 URL 参数 `agent_client` 传入；旧参数名 `agent_session` 仍兼容）、`page`。
+- 连接参数：`system`、`client`（工作台窗口 ID，内嵌时由 URL 参数 `agent_client` 传入；旧参数名 `agent_session` 仍兼容）、`page`。页面所在的源须在允许列表里（R5.8），否则握手被拒绝。
 - 注册时按清单白名单过滤；风险等级以清单为准；工具显示名以清单 `title` 为准，其次是页面注册时的 `title`。
 - 页面断开时工具自动下线，未完成的调用返回 `UI_DISCONNECTED`；连接变化以 `bridge_status` 推给所有工作台窗口。
 - 调用超时 20 秒（`AGENT_UI_CALL_TIMEOUT_S`）。
@@ -200,7 +201,8 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | `LLM_STREAM` | true | 流式输出；接口不支持时自动退回一次性返回 |
 | `RULE_STREAM_DELAY_S` | 0.012 | 规则模式模拟逐字输出的间隔，0 为不模拟 |
 | `AGENT_HOST` / `AGENT_PORT` | 127.0.0.1 / 8000 | Agent 服务监听地址 |
-| `AGENT_PUBLIC_URL` | http://localhost:8000 | 浏览器访问 Agent 的地址：下发给内嵌系统页面连接桥接中心、读取结果，并作为 CORS 允许来源 |
+| `AGENT_PUBLIC_URL` | http://localhost:8000 | 浏览器访问 Agent 的地址：下发给内嵌系统页面连接桥接中心、读取结果，并作为允许的浏览器来源（CORS 与来源校验）。用别的地址访问工作台时必须改它 |
+| `AGENT_ALLOWED_ORIGINS` | 空 | 额外允许的浏览器来源，逗号分隔（如前端开发时的 `http://localhost:5173`、反向代理域名）。默认已允许 `AGENT_PUBLIC_URL` 和各系统清单里的地址 |
 | `AGENT_DATA_DIR` | ./data | 对话、结果、审计、反馈的存放目录 |
 | `AGENT_WEB_DIR` | ./web/dist | 工作台构建产物目录 |
 | `AGENT_MANIFESTS` | systems/*/manifest.yaml | 接入清单位置 |

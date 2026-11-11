@@ -35,7 +35,9 @@ LLM_MODEL=qwen-plus
 LLM_API_KEY=sk-...
 ```
 
-**前端开发**：`python run.py` 启动后端，另开终端 `cd web && npm run dev`，打开 Vite 给出的地址（接口、桥接 SDK、WebSocket 都代理到 8000 端口）。
+**前端开发**：在 `.env` 里加 `AGENT_ALLOWED_ORIGINS=http://localhost:5173`（Agent 服务只接受允许列表里的浏览器来源），`python run.py` 启动后端，另开终端 `cd web && npm run dev`，打开 Vite 给出的地址（接口、桥接 SDK、WebSocket 都代理到 8000 端口）。
+
+**换地址访问**：通过 `http://localhost:8000` 以外的地址（局域网 IP、域名、反向代理）打开工作台时，把 `AGENT_PUBLIC_URL` 改成该地址；否则工作台会一直显示断线，Agent 服务日志里有被拒绝的来源。
 
 ## 工作台
 

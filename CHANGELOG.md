@@ -42,6 +42,7 @@
 
 ### 修复
 
+- **写操作确认可以被别的网页绕过**（ADR-0012）：`/ws/workbench`、`/ws/bridge` 原先不校验 `Origin`，用户浏览器里的任意网页都能连上工作台通道、发起任务并自己回“确认”。现在 WebSocket 握手和会改状态的 HTTP 请求带了 `Origin` 且不在允许列表时被拒绝（403）；允许列表为 `AGENT_PUBLIC_URL`、各系统清单里的地址和新配置项 `AGENT_ALLOWED_ORIGINS`。**升级时注意**：用 `http://localhost:8000` 以外的地址访问工作台需要设置 `AGENT_PUBLIC_URL`；前端开发需要 `AGENT_ALLOWED_ORIGINS=http://localhost:5173`。接入规则新增 R5.8。
 - 配置了模型时，系统提示词里的当前时间固定按东八区计算，不受 `AGENT_TZ` 影响；现在与规则模式一样按 `AGENT_TZ` 计算，并在提示词里写明时区和 UTC 偏移。
 - 测试夹具清掉所有 `APP_` / `LLM_` / `AGENT_` / `RULE_` 前缀的环境变量，开发者终端里导出的配置不再影响测试结果。
 - 文档与代码对齐：ARCHITECTURE 第 5 节补上已有但未记录的配置 `AGENT_HTTP_TIMEOUT_S`、`AGENT_DEFAULT_USER`、`AGENT_TZ`，并更正 `AGENT_PUBLIC_URL` 的用途说明；第 1 节补上请求头 `X-Agent-Session`；`.env.example` 补齐全部可选配置。

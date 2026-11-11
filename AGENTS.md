@@ -44,7 +44,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 每条的理由和放弃的方案见对应 ADR。确实需要放宽时，先写新的 ADR 讨论，不要在实现里顺手改。
 
 1. **所有工具调用经 `Gateway.call()`**（[ADR-0002](docs/adr/0002-gateway-single-entry.md)）。不要在运行时、server 或 provider 里绕过网关直连业务系统；网关不抛异常，一律返回带 `fix_hint` 的错误信封（`contracts.py`）。
-2. **写操作两段式**（[ADR-0003](docs/adr/0003-two-phase-write.md)）。提交工具只收 `confirm_token`，令牌由网关在预览成功后签发、绑定对话、10 分钟有效，并回放预览时保存的参数；确认只能由运行时的 `ctx.confirm` 通道产生。`/mcp` 与 `/api/ui-actions` 没有确认通道，不得放开写入。用户确认后的提交用 `asyncio.shield` 保护，不被“停止”打断。
+2. **写操作两段式**（[ADR-0003](docs/adr/0003-two-phase-write.md)）。提交工具只收 `confirm_token`，令牌由网关在预览成功后签发、绑定对话、10 分钟有效，并回放预览时保存的参数；确认只能由运行时的 `ctx.confirm` 通道产生。`/mcp` 与 `/api/ui-actions` 没有确认通道，不得放开写入。用户确认后的提交用 `asyncio.shield` 保护，不被“停止”打断。确认通道只对工作台页面开放：WebSocket 握手和会改状态的 HTTP 请求由 `server.OriginGuard` 校验浏览器来源（[ADR-0012](docs/adr/0012-browser-origin-check.md)），新增入口不要绕开这层中间件。
 3. **大数据走引用**（[ADR-0004](docs/adr/0004-result-references.md)）。不要把整份列表放进模型上下文；新增参数需要接收上一步结果时用清单 `accepts_result`，转换在网关做。
 4. **界面工具只能是 `view` / `read`**（[ADR-0005](docs/adr/0005-ui-tools-view-read-only.md)），业务写入只走 API 预览/提交。工具必须在清单 `ui_bridge.tools` 白名单中。
 5. **坐标统一 WGS84**（[ADR-0006](docs/adr/0006-wgs84-coordinates.md)），GeoJSON 顺序 [经度, 纬度]；系统内部的其他坐标系在钩子或系统接口内转换。
