@@ -29,7 +29,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 ├─ 结果仓库 results.py       result_id 句柄、类型识别、格式转换（data/results/）
 ├─ 审计 audit.py             data/audit.jsonl
 └─ /mcp                      MCP 调试端点（tools/list、tools/call 子集）
-▼ HTTP（X-Agent-User / X-Agent-Session / X-Request-Id / Idempotency-Key）
+▼ HTTP（X-Agent-User / X-Agent-Session / X-Request-Id / Idempotency-Key / If-Match）
 业务系统（systems/，各自独立进程）
 ├─ 车队追踪地图台 :8101    REST API + 地图页面
 ├─ 排班系统 :8102          REST API
@@ -62,7 +62,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 6. `analytics__run_grouping(points="res_B", groups=5, max_size=8)`：内置分组 → `res_C`（`group_plan`）。
 7. 同一轮并行调用两个展示工具：`fleet__show_result_layer` 经桥接 WebSocket 发到本窗口的地图页面，页面调用自己的 `addTempLayer` 叠加分组；`canvas__show` 发出 `render` 事件，工作台在“结果”页签展示分组。工作台的规则：这一轮操作了系统页面时，停留在系统页签，“结果”页签只亮提示点。
 8. `dispatch__preview_regroup(region, groups="res_C")`：网关把 `res_C` 转成分组列表，经 `adapter_hooks` 映射成调度系统的字段，调用预览接口；成功后网关签发 `confirm_token`，并保存这次预览的参数。
-9. `dispatch__apply_regroup(confirm_token)`：网关核对令牌（存在、未过期、属于本对话、工具匹配），通过运行时向工作台发 `confirm_request`（含变更清单）并等待。用户点“确认提交”后，网关**回放预览时保存的参数**调用提交接口，`Idempotency-Key` 为该令牌。
+9. `dispatch__apply_regroup(confirm_token)`：网关核对令牌（存在、未过期、属于本对话、工具匹配），通过运行时向工作台发 `confirm_request`（含变更清单）并等待。用户点“确认提交”后，网关**回放预览时保存的参数**调用提交接口，`Idempotency-Key` 为该令牌，`If-Match` 为预览时调度系统给出的分组版本（期间分组被别人改过则提交被拒，返回 `PREVIEW_STALE`）。
 10. 模型给出最终答复（`message`），运行结束（`run_finished`，规则模式附带追问建议）。每次工具调用都已写入审计日志；需要重放的事件已写入对话文件。
 
 ## 3. 关键机制
@@ -100,6 +100,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - 确认通道只对工作台页面开放（ADR-0012）：WebSocket 握手和会改状态的 HTTP 请求带了 `Origin` 且不在允许列表（`AGENT_PUBLIC_URL`、各系统清单里的地址、`AGENT_ALLOWED_ORIGINS`）时被拒绝，别的网页不能借用户的浏览器发起任务或代点确认。不带 `Origin` 的非浏览器客户端不受影响。
 - 用户点确认之后的提交不会被“停止”打断（`asyncio.shield`）：停止只取消等待中的部分；已确认的提交完成后照常写审计，并注明“任务停止后完成”。
 - 提交成功后令牌标记为已使用；重复调用返回第一次的结果，并带 `Idempotency-Key` 防止系统侧重复执行。
+- 预览之后数据变了不提交（ADR-0013，R3.7）：预览返回值里的 `etag`（数据版本）由网关存进令牌，不进模型上下文；提交时以 `If-Match` 带回。系统答复 409 / 412 时网关返回 `PREVIEW_STALE` 并作废令牌，必须重新预览、重新确认。预览不给 `etag` 的系统没有这层保护。
 
 ### 3.4 前端桥接协议（/ws/bridge）
 

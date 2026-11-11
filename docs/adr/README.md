@@ -37,3 +37,4 @@
 | [0010](0010-lint-ci-and-line-endings.md) | 引入 ruff 检查、CI 与统一 LF 换行 | 已采纳 | 完成前检查 |
 | [0011](0011-intent-playbooks.md) | 意图识别与场景剧本：声明式剧本驱动规则模式、提示模型并参与工具路由 | 提议 | AGENTS 约束 1–3（不放宽，补充剧本侧校验） |
 | [0012](0012-browser-origin-check.md) | WebSocket 握手和会改状态的 HTTP 请求校验浏览器来源 | 已采纳 | AGENTS 约束 2 |
+| [0013](0013-preview-version-check.md) | 提交时带回预览的数据版本，系统发现已变化就拒绝 | 已采纳 | AGENTS 约束 2 |

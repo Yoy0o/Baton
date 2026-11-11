@@ -297,6 +297,7 @@ class OpenAPIProvider:
         *,
         idempotency_key: str | None = None,
         replay: bool = False,
+        if_match: str | None = None,
     ) -> CallOutcome:
         bound = self.tools.get(name)
         if bound is None:
@@ -343,6 +344,8 @@ class OpenAPIProvider:
         }
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
+        if if_match:
+            headers["If-Match"] = if_match  # 预览时系统给出的数据版本（R3.7）
         if self.m.auth.mode == "static_bearer" and self.m.auth.token_env:
             headers["Authorization"] = f"Bearer {os.environ.get(self.m.auth.token_env, '')}"
 
@@ -400,6 +403,7 @@ class OpenAPIProvider:
             403: "当前用户无权执行该操作，请如实告知用户，不要换工具绕过",
             404: "对象不存在：先用 search/get 类工具确认 ID",
             409: "数据已被修改：重新预览后再提交",
+            412: "数据已被修改：重新预览后再提交",
             422: "参数不合法：对照工具 schema 修正后重试",
         }.get(status, "稍后重试" if status >= 500 else None)
         return ToolError(f"HTTP_{status}", message, hint, retryable=status in (408, 429) or status >= 500)

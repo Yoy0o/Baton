@@ -128,6 +128,50 @@ def test_write_requires_preview_and_confirmation(settings, transport, approve):
     run(body())
 
 
+def test_stale_preview_is_not_committed(settings, transport):
+    """预览之后数据变了（R3.7）：提交带回预览时的版本，系统拒绝，网关报 PREVIEW_STALE 并作废令牌，不落库。"""
+
+    async def body():
+        p = await _platform(settings, transport)
+        asked = []
+
+        async def confirm(entry):
+            asked.append(entry)
+            return True
+
+        async def version() -> int:
+            return (await p.http.get("http://localhost:8103/api/groups?region=east-china")).json()["version"]
+
+        ctx = CallContext(user="local", session_id="s1", confirm=confirm)
+        plan = await _plan(p, ctx)
+        first = await p.gateway.call(ctx, "dispatch__preview_regroup", {"region": "east-china", "groups": plan})
+        second = await p.gateway.call(ctx, "dispatch__preview_regroup", {"region": "east-china", "groups": plan})
+        assert p.gateway.confirms[first["confirm_token"]].etag == "east-china-v1"
+        assert "etag" not in (first.get("data") or {})  # 版本标识由网关保管，不进模型上下文
+        before = await version()
+
+        # 两份预览基于同一个版本；第一份提交后，第二份用户确认的清单已经过时
+        assert (await p.gateway.call(ctx, "dispatch__apply_regroup", {"confirm_token": first["confirm_token"]}))["ok"]
+        stale = await p.gateway.call(ctx, "dispatch__apply_regroup", {"confirm_token": second["confirm_token"]})
+        assert stale["error_code"] == "PREVIEW_STALE" and "dispatch__preview_regroup" in stale["fix_hint"]
+        assert len(asked) == 2 and await version() == before + 1  # 用户确认过，但没有落库
+        entry = p.audit.tail()[0]
+        assert entry["error_code"] == "PREVIEW_STALE" and entry["confirmed"] is True and entry["ok"] is False
+
+        # 令牌已作废：换一次运行再提交，直接拒绝，不再打扰用户
+        later = CallContext(user="local", session_id="s1", confirm=confirm)
+        again = await p.gateway.call(later, "dispatch__apply_regroup", {"confirm_token": second["confirm_token"]})
+        assert again["error_code"] == "PREVIEW_STALE" and len(asked) == 2 and await version() == before + 1
+
+        # 重新预览拿到新版本，照常提交
+        fresh = await p.gateway.call(later, "dispatch__preview_regroup", {"region": "east-china", "groups": plan})
+        assert p.gateway.confirms[fresh["confirm_token"]].etag == "east-china-v2"
+        assert (await p.gateway.call(later, "dispatch__apply_regroup", {"confirm_token": fresh["confirm_token"]}))["ok"]
+        await p.http.aclose()
+
+    run(body())
+
+
 def test_write_without_ui_channel_is_refused(settings, transport):
     async def body():
         p = await _platform(settings, transport)
