@@ -19,6 +19,7 @@ agent/ Agent 服务 (FastAPI :8000)
    providers/ openapi（API）· bridge（界面）· builtin（分组/画布/结果）   conversations.py 对话 JSON 与事件重放
    results.py 结果仓库(result_id)   audit.py 审计   llm.py / rule_planner.py 模型 / 规则模式（只调剧本，不写场景）
    manifest.py 清单模型与规则校验   check.py 接入检查命令   analytics.py 带人数上限的空间分组
+   evaluate.py 模型对照评测命令（规则模式的工具序列作参考）
 systems/  三个模拟业务系统 fleet:8101 · tms:8102 · dispatch:8103，各带 manifest.yaml + SKILL.md，fleet/dispatch 带 playbooks.yaml；样例数据在 _sample_data.py
 ```
 
@@ -32,6 +33,7 @@ python run.py                       # 起三个模拟系统 + Agent，http://loc
 python -m pytest -q                 # 全部测试，不占端口（ASGI transport），不依赖前端构建
 ruff check .                        # 代码检查（配置在 pyproject.toml）；ruff check . --fix 自动修复导入顺序等
 python -m agent.check [manifest.yaml] -v   # 校验接入清单，需系统已启动
+python -m agent.evaluate [--only id,…]     # 模型对照评测：场景剧本示例对照规则模式与配置的模型，需系统已启动、已配置 LLM_*
 cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 生成 web/dist；npm run dev 联调（代理到 8000）
 ```
 
@@ -65,7 +67,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 | 新增内置工具 | `providers/builtin_provider.py` |
 | 改桥接 SDK / 桥接协议 | `sdk/agent-bridge.js`（纯 JS，无需构建）+ `providers/bridge_provider.py`；参考实现是 `systems/fleet/static/map.html` 末尾；同步 ARCHITECTURE 3.4 与 INTEGRATION_RULES 第 5 节 |
 | 新增 / 改 REST 或 WS 接口 | `agent/server.py`；前端调用在 `web/src/api.ts`、`web/src/socket.ts`；同步 ARCHITECTURE 第 1 节和 3.5 节 |
-| 换模型接口 | `llm.py`，只需满足 `complete(messages, tools, on_delta=None)` |
+| 换模型接口 | `llm.py`，只需满足 `complete(messages, tools, on_delta=None)`；换了模型或改了提示词后跑 `python -m agent.evaluate`，结果记进开发日志 |
 | 改样例数据或场景剧本 | `systems/_sample_data.py`、`systems/*/playbooks.yaml`；README“验证清单”里的数字和 `tests/test_scenarios.py` 依赖它们，一并核对 |
 | 新增配置项 | `agent/config.py` 的 `Settings` + `.env.example` + ARCHITECTURE 第 5 节 |
 | 工作台界面 | `web/src/components/`；视觉约定在 `web/src/theme.ts`（琥珀色只表示写操作/确认，系统标识色避开琥珀、绿、红）；改完重建 `web/dist` |

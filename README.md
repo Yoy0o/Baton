@@ -35,6 +35,8 @@ LLM_MODEL=qwen-plus
 LLM_API_KEY=sk-...
 ```
 
+**换了模型先评测**：系统启动后运行 `python -m agent.evaluate`。它把各系统场景剧本的示例分别交给规则模式和配置的模型，对照工具调用（该调的有没有调、有没有走到写操作确认、多用了几轮），逐个场景给出通过与否。确认卡片默认自动取消，不会修改业务系统；评测用临时数据目录，不影响正式的对话和审计。
+
 **前端开发**：在 `.env` 里加 `AGENT_ALLOWED_ORIGINS=http://localhost:5173`（Agent 服务只接受允许列表里的浏览器来源），`python run.py` 启动后端，另开终端 `cd web && npm run dev`，打开 Vite 给出的地址（接口、桥接 SDK、WebSocket 都代理到 8000 端口）。
 
 **换地址访问**：通过 `http://localhost:8000` 以外的地址（局域网 IP、域名、反向代理）打开工作台时，把 `AGENT_PUBLIC_URL` 改成该地址；否则工作台会一直显示断线，Agent 服务日志里有被拒绝的来源。
@@ -74,6 +76,7 @@ LLM_API_KEY=sk-...
 
 ```bash
 python -m agent.check            # 校验接入清单、读取各系统 OpenAPI、列出将生成的工具（需系统已启动）
+python -m agent.evaluate         # 模型对照评测：用场景剧本的示例对照规则模式与配置的模型（需系统已启动、已配置模型）
 pip install -r requirements-dev.txt && python -m pytest -q   # 覆盖接入规则、剧本与意图识别、网关、场景、协议、会话
 curl -s -G localhost:8000/api/intents --data-urlencode "text=把北京晚班的司机分成 4 组"   # 只识别不执行：命中的场景、取出的参数
 cd web && npm run typecheck      # 工作台类型检查
@@ -99,6 +102,7 @@ agent/                Agent 服务
   manifest.py           接入清单模型与规则校验
   llm.py / rule_planner.py   OpenAI 兼容模型接入（流式）/ 规则模式（按剧本执行）
   check.py              接入检查命令
+  evaluate.py           模型对照评测命令
 web/                  工作台前端（React + Ant Design X + Vite），构建产物在 web/dist
   src/App.tsx           布局、会话、实时事件
   src/store.ts          由事件重放得到对话视图（实时与历史同一套逻辑）

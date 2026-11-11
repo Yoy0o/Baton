@@ -6,8 +6,6 @@ import json
 from datetime import date
 
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
 
 from agent.llm import OpenAICompatLLM
 from agent.rule_planner import RulePlanner
@@ -18,6 +16,7 @@ from helpers import (
     Driver,
     FakePage,
     dispatch_version,
+    fake_llm_app,
     final_text,
     finished,
     tools_called,
@@ -201,57 +200,12 @@ def test_regenerate_replaces_last_run(settings, transport):
     asyncio.run(body())
 
 
-def _fake_llm_app(planner: RulePlanner, seen: list[dict]) -> FastAPI:
-    """假的 OpenAI 兼容接口：决策仍由规则规划器完成，按请求返回 SSE 流或完整 JSON。"""
-    fake = FastAPI()
-
-    @fake.post("/v1/chat/completions")
-    async def completions(request: Request):
-        body = await request.json()
-        seen.append(body)
-        assert request.headers["authorization"] == "Bearer sk-test"
-        assert body["model"] == "fake-model" and body["tool_choice"] == "auto"
-        for t in body["tools"]:
-            assert t["type"] == "function" and set(t["function"]) == {"name", "description", "parameters"}
-        assert body["messages"][0]["role"] == "system"
-        for i, m in enumerate(body["messages"]):
-            if m["role"] == "tool":  # 工具结果必须对应前面 assistant 消息里声明的调用
-                prev = [x for x in body["messages"][:i] if x["role"] == "assistant" and x.get("tool_calls")][-1]
-                assert m["tool_call_id"] in {c["id"] for c in prev["tool_calls"]}
-                json.loads(m["content"])
-            assert "reasoning" not in m and "suggestions" not in m
-        msg = await planner.complete(body["messages"], body["tools"])
-        msg.pop("suggestions", None)
-        if not body.get("stream"):
-            return {"id": "x", "object": "chat.completion", "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}]}
-
-        def sse():
-            def chunk(delta):
-                return "data: " + json.dumps({"choices": [{"index": 0, "delta": delta}]}, ensure_ascii=False) + "\n\n"
-
-            yield chunk({"role": "assistant", "reasoning_content": "先想一想。"})
-            text = msg.get("content") or ""
-            for i in range(0, len(text), 5):
-                yield chunk({"content": text[i : i + 5]})
-            for idx, tc in enumerate(msg.get("tool_calls") or []):
-                args = tc["function"]["arguments"]
-                half = len(args) // 2
-                yield chunk({"tool_calls": [{"index": idx, "id": tc["id"], "type": "function",
-                                             "function": {"name": tc["function"]["name"], "arguments": args[:half]}}]})
-                yield chunk({"tool_calls": [{"index": idx, "function": {"arguments": args[half:]}}]})
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(sse(), media_type="text/event-stream")
-
-    return fake
-
-
 def _run_with_fake_llm(settings, transport, stream: bool):
     planner = RulePlanner(settings)
     seen: list[dict] = []
 
     async def body():
-        transport.routes["llm.test:9000"] = httpx.ASGITransport(app=_fake_llm_app(planner, seen))
+        transport.routes["llm.test:9000"] = httpx.ASGITransport(app=fake_llm_app(planner, seen))
         settings.llm_base_url, settings.llm_model, settings.llm_api_key = "http://llm.test:9000/v1", "fake-model", "sk-test"
         settings.llm_stream = stream
         p = Platform(settings, transport)
