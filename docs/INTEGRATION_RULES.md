@@ -1,6 +1,6 @@
 # 系统接入规则 v1
 
-适用版本：Baton v0.2（v0.1 时名为 Agent Hub，规则本身未变，v0.2 只补充了 R5.5–R5.7 和清单的 `color`、界面工具 `title` 两个可选字段；未发布版本新增第 11 节场景剧本与清单的 `playbooks` 字段）。规则编号（R1.1 等）与代码中的校验提示一一对应；标注 **[校验]** 的规则由 `agent/manifest.py`、网关或 `python -m agent.check` 自动检查，违反时拒绝加载或拒绝注册。
+适用版本：Baton v0.3（v0.1 时名为 Agent Hub，规则本身未变；v0.2 补充了 R5.5–R5.7 和清单的 `color`、界面工具 `title` 两个可选字段；v0.3 新增第 11 节场景剧本与清单的 `playbooks` 字段、R3.7 预览版本校验、R5.8 桥接来源校验）。规则编号（R1.1 等）与代码中的校验提示一一对应；标注 **[校验]** 的规则由 `agent/manifest.py`、网关或 `python -m agent.check` 自动检查，违反时拒绝加载或拒绝注册。
 
 一句话：**一个系统 = 一份接入清单（manifest.yaml）+ 可选的知识包（SKILL.md）+ 可选的格式钩子（adapter_hooks.py）+ 可选的场景剧本（playbooks.yaml）**。系统后端不改代码；需要界面能力时，前端加一个 SDK 和几个处理函数。
 

@@ -1,5 +1,5 @@
 /*!
- * agent-bridge.js v0.2 —— 前端桥接 SDK（Baton）
+ * agent-bridge.js v0.3 —— 前端桥接 SDK（Baton）
  *
  * 作用：让已有 Web 系统把“界面上已有的操作”注册成 Agent 可调用的工具，系统后端无需改动。
  * 接口形态对齐 WebMCP（registerTool({name, description, inputSchema, annotations, execute})），
