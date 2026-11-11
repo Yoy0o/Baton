@@ -1,6 +1,6 @@
 # AGENTS.md
 
-给在本仓库工作的编码 Agent 看的速查。产品说明见 [README.md](README.md)，完整架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，系统接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，设计理由见 [docs/adr/](docs/adr/README.md)；这里不重复，只写动手前必须知道的事。任务结束前按“完成前检查”和“文档与留痕”两节收尾。
+给在本仓库工作的编码 Agent 看的速查。产品说明见 [README.md](README.md)，完整架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，系统接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，设计理由见 [docs/adr/](docs/adr/README.md)，接下来做什么见 [docs/ROADMAP.md](docs/ROADMAP.md)；这里不重复，只写动手前必须知道的事。任务结束前按“完成前检查”和“文档与留痕”两节收尾。
 
 ## 项目是什么
 
@@ -106,6 +106,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 | 组件、请求链路、事件协议、配置项 | ARCHITECTURE 对应章节（配置是第 5 节，事件是 3.5 节） |
 | 接入规则、清单字段、剧本字段 | INTEGRATION_RULES |
 | 启动方式、验证清单、版本边界 | README |
+| 后续方向、优先级、条目状态（开始做、做完、新发现的问题） | [docs/ROADMAP.md](docs/ROADMAP.md) |
 | Agent 的工作约定本身 | 本文件 |
 
 规则：已发布版本的 CHANGELOG 条目和已采纳 ADR 的正文不改，只追加；开发日志只追加，发现写错在文末补“更正”。

@@ -12,7 +12,7 @@ v0.2 把工作台重做成常规的 Agent 工作台（React + Ant Design X）：
 
 产品名可在 `.env` 里用 `APP_NAME` 修改（标题、侧栏、服务名都从这里读取），不需要改代码。
 
-架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。参与开发（包括用编码 Agent）先读 [AGENTS.md](AGENTS.md)。
+架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，接入规则见 [docs/INTEGRATION_RULES.md](docs/INTEGRATION_RULES.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)，后续方向与优先级见 [docs/ROADMAP.md](docs/ROADMAP.md)。参与开发（包括用编码 Agent）先读 [AGENTS.md](AGENTS.md)。
 
 ## 快速开始
 
@@ -107,7 +107,7 @@ systems/              三个模拟业务系统，各带 manifest.yaml、SKILL.md
   tms/                  排班系统：REST API
   dispatch/             调度系统：REST API（预览 / 提交），adapter_hooks.py 格式映射示例
 tests/                测试
-docs/                 架构说明、接入规则
+docs/                 架构说明、接入规则、路线图（ROADMAP.md）
   adr/                  架构决策记录（为什么这样设计）
   devlog/               开发日志（每次开发任务的改动、验证、遗留问题）
 ```
