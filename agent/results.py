@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -17,7 +18,10 @@ from typing import Any
 
 from .contracts import PREVIEW_ROWS, ToolError
 
+log = logging.getLogger("agent.results")
+
 RESULT_TYPES = ("table", "feature_collection", "group_plan", "object")
+_SWEEP_INTERVAL_S = 600  # 写入新结果时顺带清理过期结果，最多每 10 分钟一次
 MAX_ROWS = 5000  # 单个结果的行数上限（接入规则 R2.4）
 
 _LNG_KEYS = ("lng", "lon", "longitude")
@@ -57,6 +61,39 @@ class ResultStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.ttl_s = ttl_s
         self._mem: dict[str, Result] = {}
+        self._last_sweep = 0.0
+        self._load_all()
+
+    def _load_all(self) -> None:
+        """启动时读回未过期的结果（重启后“本会话已有结果”和结果引用照常可用），顺带删掉过期的文件。"""
+        now = time.time()
+        for path in self.dir.glob("res_*.json"):
+            try:
+                res = Result(**json.loads(path.read_text(encoding="utf-8")))
+            except Exception as e:  # 单个文件损坏不影响其他结果
+                log.warning("skip broken result file %s: %s", path.name, e)
+                continue
+            if res.expires_at and res.expires_at < now:
+                self._unlink(res.id)
+            else:
+                self._mem[res.id] = res
+        self._last_sweep = now
+
+    def _unlink(self, result_id: str) -> None:
+        try:
+            (self.dir / f"{result_id}.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def sweep(self, now: float | None = None) -> int:
+        """清理过期结果（内存和磁盘），返回清理的个数。过期的结果本来就读不到（RESULT_EXPIRED），留着只占空间。"""
+        now = time.time() if now is None else now
+        expired = [r.id for r in self._mem.values() if r.expires_at and r.expires_at < now]
+        for rid in expired:
+            self._mem.pop(rid, None)
+            self._unlink(rid)
+        self._last_sweep = now
+        return len(expired)
 
     def put(
         self,
@@ -84,6 +121,8 @@ class ResultStore:
             source=source or {},
         )
         res.expires_at = res.created_at + self.ttl_s
+        if res.created_at - self._last_sweep > _SWEEP_INTERVAL_S:
+            self.sweep(res.created_at)
         self._mem[res.id] = res
         try:
             (self.dir / f"{res.id}.json").write_text(json.dumps(asdict(res), ensure_ascii=False), encoding="utf-8")

@@ -55,6 +55,8 @@ class Settings:
     ui_call_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_UI_CALL_TIMEOUT_S", "20")))
     http_timeout_s: float = field(default_factory=lambda: float(_env("AGENT_HTTP_TIMEOUT_S", "30")))
     result_ttl_s: int = field(default_factory=lambda: int(_env("AGENT_RESULT_TTL_S", str(24 * 3600))))
+    # 审计文件超过这个大小（MB）时改名留存、另起新文件；0 为不轮转。平台不删除审计文件
+    audit_rotate_mb: float = field(default_factory=lambda: float(_env("AGENT_AUDIT_ROTATE_MB", "50")))
     # 工具总数不超过该值时全量加载；超过时按系统关键词路由，只加载相关系统
     full_catalog_limit: int = field(default_factory=lambda: int(_env("AGENT_FULL_CATALOG_LIMIT", "30")))
     # 未接 SSO 时所有请求归属的用户：对话、结果、审计、X-Agent-User 请求头都用它

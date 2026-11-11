@@ -27,7 +27,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 │   ├─ 前端桥接   providers/bridge_provider.py    页面注册的界面工具 → WebSocket 调用
 │   └─ 内置能力   providers/builtin_provider.py   分组 · 画布展示 · 结果查看与统计
 ├─ 结果仓库 results.py       result_id 句柄、类型识别、格式转换（data/results/）
-├─ 审计 audit.py             data/audit.jsonl
+├─ 审计 audit.py             data/audit.jsonl（启动时读回最近 500 条；按大小轮转，不删除）
 └─ /mcp                      MCP 调试端点（tools/list、tools/call 子集）
 ▼ HTTP（X-Agent-User / X-Agent-Session / X-Request-Id / Idempotency-Key / If-Match）
 业务系统（systems/，各自独立进程）
@@ -90,7 +90,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - API 返回的列表自动识别：GeoJSON → `feature_collection`；含 `lng`/`lat` 的记录 → 转为点要素；其他列表 → `table`；小对象直接内联，大对象存为 `object`。
 - 参数通过清单 `accepts_result` 接收 `result_id`，网关负责转换（`ids` / `rows` / `geojson` / `group_plan`）。
 - 浏览器端（地图页面、工作台“结果”页签）通过 `GET /api/results/{id}?format=geojson|rows|full` 读取完整数据。
-- 结果默认保存 24 小时（内存 + `data/results/*.json`）。
+- 结果默认保存 24 小时（内存 + `data/results/*.json`）。服务启动时读回未过期的结果，重启后结果引用和“本对话已有结果”照常可用；过期的结果从内存和磁盘清掉（启动时，以及之后写入新结果时顺带清理，最多每 10 分钟一次）。
 
 ### 3.3 写操作：预览 → 确认 → 提交（gateway.py）
 
@@ -99,7 +99,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - 确认由运行时强制：网关调用 `ctx.confirm(entry)`，运行时向工作台推送确认卡片并等待用户决定；无确认通道（如 `/mcp`）时直接拒绝写入。工作台的直接操作接口 `/api/ui-actions` 只接受界面工具（只改界面或只读）。
 - 确认通道只对工作台页面开放（ADR-0012）：WebSocket 握手和会改状态的 HTTP 请求带了 `Origin` 且不在允许列表（`AGENT_PUBLIC_URL`、各系统清单里的地址、`AGENT_ALLOWED_ORIGINS`）时被拒绝，别的网页不能借用户的浏览器发起任务或代点确认。不带 `Origin` 的非浏览器客户端不受影响。
 - 用户点确认之后的提交不会被“停止”打断（`asyncio.shield`）：停止只取消等待中的部分；已确认的提交完成后照常写审计，并注明“任务停止后完成”。
-- 提交成功后令牌标记为已使用；重复调用返回第一次的结果，并带 `Idempotency-Key` 防止系统侧重复执行。
+- 提交成功后令牌标记为已使用；重复调用返回第一次的结果，并带 `Idempotency-Key` 防止系统侧重复执行。令牌过期一小时后从内存清理。
 - 预览之后数据变了不提交（ADR-0013，R3.7）：预览返回值里的 `etag`（数据版本）由网关存进令牌，不进模型上下文；提交时以 `If-Match` 带回。系统答复 409 / 412 时网关返回 `PREVIEW_STALE` 并作废令牌，必须重新预览、重新确认。预览不给 `etag` 的系统没有这层保护。
 
 ### 3.4 前端桥接协议（/ws/bridge）
@@ -214,7 +214,8 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | `AGENT_UI_CALL_TIMEOUT_S` | 20 | 界面工具调用超时 |
 | `AGENT_HTTP_TIMEOUT_S` | 30 | 调用业务系统接口的 HTTP 超时 |
 | `AGENT_FULL_CATALOG_LIMIT` | 30 | 工具数超过该值时按关键词路由 |
-| `AGENT_RESULT_TTL_S` | 86400 | 结果保存时长 |
+| `AGENT_RESULT_TTL_S` | 86400 | 结果保存时长；过期后从内存和磁盘清理 |
+| `AGENT_AUDIT_ROTATE_MB` | 50 | 审计文件 `audit.jsonl` 超过这个大小时改名为 `audit-<时间>.jsonl` 留存、另起新文件；0 为不轮转。平台不删除审计文件，保留多久由运维决定 |
 | `AGENT_DEFAULT_USER` | local | 未接 SSO 时所有请求归属的用户：对话、结果、审计、`X-Agent-User` 请求头都用它 |
 | `AGENT_TZ` | Asia/Shanghai | IANA 时区名：系统提示词里的当前时间、规则模式解析“今天”“明天”都按它计算 |
 | `FLEET_URL` / `TMS_URL` / `DISPATCH_URL` | localhost:8101/8102/8103 | 模拟系统地址（清单中引用） |

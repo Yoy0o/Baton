@@ -57,7 +57,7 @@ class Platform:
         self.manifests = load_manifests(settings.manifests_glob)
         self.http = httpx.AsyncClient(transport=transport, timeout=settings.http_timeout_s)
         self.store = ResultStore(settings.data_dir, settings.result_ttl_s)
-        self.audit = AuditLog(settings.data_dir)
+        self.audit = AuditLog(settings.data_dir, rotate_bytes=int(settings.audit_rotate_mb * 1024 * 1024), tz=settings.tzinfo)
         self.conversations = ConversationStore(settings.data_dir)
         self.clients: dict[str, WebSocket] = {}
         self._send_locks: dict[str, asyncio.Lock] = {}

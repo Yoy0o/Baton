@@ -33,6 +33,7 @@ from .results import ResultStore
 log = logging.getLogger("agent.gateway")
 
 CONFIRM_TTL_S = 600  # confirm_token 有效期（R3.2）
+_CONFIRM_KEEP_S = 3600  # 过期后再留这么久才清理：仍在等用户确认的条目要留着，重复提交也还能得到明确的错误
 _RELOAD_INTERVAL_S = 5
 # 不记为“失败过”的错误：停止任务不是调用本身的问题；界面未打开可能在运行中变化（用户打开了页面）
 _UNTRACKED_FAILURES = {"CANCELLED", "REPEATED_CALL", "UI_NOT_CONNECTED"}
@@ -276,6 +277,9 @@ class Gateway:
         columns = list(dict.fromkeys(k for c in changes[:50] for k in c))
         summary = raw.get("summary") if isinstance(raw.get("summary"), str) else outcome.envelope.get("summary", "")
         etag = raw.get("etag")
+        now = time.time()
+        for old in [t for t, e in self.confirms.items() if now > e.expires_at + _CONFIRM_KEEP_S]:
+            self.confirms.pop(old, None)  # 清理早已过期的令牌，避免长期运行时只增不减
         token = "cf_" + uuid.uuid4().hex[:12]
         assert spec.pairs_with
         self.confirms[token] = PendingConfirm(
