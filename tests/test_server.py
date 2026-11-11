@@ -204,3 +204,28 @@ def test_foreign_origin_is_rejected(settings, transport):
         assert c.post("/mcp", content=rpc).status_code == 200  # 不带 Origin：命令行、脚本
         # 只读请求不拦（跨站读不到响应，由 CORS 负责）
         assert c.get("/api/config", headers=evil).status_code == 200
+
+
+def test_intent_log_reports_unmatched_requests(settings, transport):
+    """每次运行的识别结果落盘；接口汇总命中率和没识别到的提问（补剧本的依据），重启后仍在。"""
+
+    def say(wb, text: str) -> None:
+        wb.send_json({"type": "user_message", "conversation_id": None, "text": text})
+        _run_until_finished(wb, approve=False)
+
+    with _client(settings, transport) as c:
+        with c.websocket_connect(f"/ws/workbench?client={CLIENT}") as wb:
+            assert wb.receive_json()["type"] == "hello"
+            say(wb, "在地图上显示过去 24 小时停留超过 2 小时的挂车，按客户着色")
+            say(wb, "重新编排一下班组")
+            say(wb, "重新编排一下班组")
+            say(wb, "今天天气怎么样")
+        report = c.get("/api/intents/log").json()
+        assert report["stats"] == {"runs": 4, "matched": 1, "unmatched": 3, "match_rate": 0.25}
+        assert report["by_intent"] == [{"id": "stops", "title": "挂车停留地图", "system": "fleet", "count": 1}]
+        assert [(u["text"], u["count"]) for u in report["unmatched"]] == [("重新编排一下班组", 2), ("今天天气怎么样", 1)]
+        assert report["entries"][0]["text"] == "今天天气怎么样" and report["entries"][0]["intent"] is None
+        only_hit = c.get("/api/intents/log", params={"matched": "true"}).json()["entries"]
+        assert [e["intent"]["id"] for e in only_hit] == ["stops"] and only_hit[0]["run_id"].startswith("run_")
+    with _client(settings, transport) as c:  # 同一个数据目录，相当于重启
+        assert c.get("/api/intents/log").json()["stats"]["runs"] == 4

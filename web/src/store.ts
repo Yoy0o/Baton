@@ -61,10 +61,18 @@ export interface RenderInfo {
   title?: string;
 }
 
+/** 这次运行按场景剧本识别出的意图（run_started.intent）；没识别到为 null。 */
+export interface RunIntent {
+  id: string;
+  title: string;
+  system: string;
+}
+
 export interface Run {
   runId: string;
   text: string;
   planner: string;
+  intent: RunIntent | null;
   startedAt: number;
   placeholder?: boolean;
   steps: Step[];
@@ -112,6 +120,7 @@ function newRun(e: AgentEvent): Run {
     runId: String(e.run_id),
     text: String(e.text ?? ''),
     planner: String(e.planner ?? ''),
+    intent: e.intent?.id ? { id: String(e.intent.id), title: String(e.intent.title || e.intent.id), system: String(e.intent.system || '') } : null,
     startedAt: Number(e.started_at ?? Date.now() / 1000),
     steps: [],
     liveText: '',

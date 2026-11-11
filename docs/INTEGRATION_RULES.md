@@ -99,7 +99,7 @@
 5. 格式对不上：写 `adapter_hooks.py` 并在清单 `hooks` 中引用。
 6. 需要界面能力：页面引入 SDK，注册工具（参考 `systems/fleet/static/map.html` 末尾），清单 `ui_bridge` 中声明白名单和 `embed_url`，并放开 iframe 嵌入。
 7. 写 `SKILL.md`。
-8. 可选：为常见任务写场景剧本 `playbooks.yaml`（第 11 节），清单里加 `playbooks: playbooks.yaml`。用 `GET /api/intents?text=<一句提问>` 检查能否识别、参数取得对不对。
+8. 可选：为常见任务写场景剧本 `playbooks.yaml`（第 11 节），清单里加 `playbooks: playbooks.yaml`。上线后用 `GET /api/intents/log` 看没识别到的提问，据此补触发词。用 `GET /api/intents?text=<一句提问>` 检查能否识别、参数取得对不对。
 9. 启动系统后运行 `python -m agent.check systems/<system>/manifest.yaml -v`，应为 0 个错误；再在工作区“工具”页签确认工具和描述。
 10. 在工作台用 3–5 句真实提问试跑（有剧本的场景在规则模式和模型模式各跑一遍），在工作区“审计”页签核对每次调用。
 

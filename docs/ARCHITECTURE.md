@@ -13,7 +13,7 @@ Baton 的目标是把设计文档 v0.1 的主干跑通：**Agent 只做编排，
 │    └─ iframe：车队地图页面（systems/fleet/static/map.html）+ agent-bridge.js
 │                      │ WebSocket /ws/bridge?system&client（注册界面工具、执行调用、上报界面状态）
 │ WebSocket /ws/workbench?client（用户消息、停止、重新生成、确认决定 ↔ 运行事件）
-│ REST /api/*（配置、对话、结果、工具目录、审计、反馈、场景识别调试、用户直接调用界面工具）
+│ REST /api/*（配置、对话、结果、工具目录、审计、反馈、场景识别调试与识别记录、用户直接调用界面工具）
 ▼
 Agent 服务（agent/，FastAPI，端口 8000）
 ├─ 运行时 runtime.py        编排循环、停止 / 重新生成、确认等待、事件推送
@@ -28,6 +28,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 │   └─ 内置能力   providers/builtin_provider.py   分组 · 画布展示 · 结果查看与统计
 ├─ 结果仓库 results.py       result_id 句柄、类型识别、格式转换（data/results/）
 ├─ 审计 audit.py             data/audit.jsonl（启动时读回最近 500 条；按大小轮转，不删除）
+├─ 识别记录 intent_log.py    data/intents.jsonl：每次运行识别成了哪个场景，或没识别到（补剧本的依据）
 └─ /mcp                      MCP 调试端点（tools/list、tools/call 子集）
 ▼ HTTP（X-Agent-User / X-Agent-Session / X-Request-Id / Idempotency-Key / If-Match）
 业务系统（systems/，各自独立进程）
@@ -165,7 +166,8 @@ Agent 服务（agent/，FastAPI，端口 8000）
 - **识别**（`IntentLibrary.classify`）：排除命中 `none` 的，要求 `all` 全中、`any` 至少中一个、`match.slots` 都取到值；按（优先级，命中项数）排序。槽位按类型提取（`slots.py`：日期、数量、时长、区域、ID、指派……），`from_call` 让追问沿用上一轮的参数。每次运行开始时识别一次，出错时当作没识别到。
 - **规则模式**：未配置模型时，`RulePlanner` 只做“识别 → 按剧本推进一步”（`playbook.PlaybookRunner`）：每次被调用时从消息历史推导本轮做到哪一步（`transcript.py`），产出下一组工具调用或最终答复，最终答复按字逐段推送并附追问建议。它与真实模型走同一条链路（运行时、网关、适配器、桥接、确认、审计），所以也能藏在假的 OpenAI 兼容接口后面驱动测试。识别不到时返回由剧本自动生成的帮助文本。
 - **模型模式**：识别结果写进系统提示词的“本轮任务识别”一节（意图、已取出的参数、建议步骤、未满足的前置条件、其他可能），标明仅供参考；识别不到时不加这一节。
-- **路由与工作台**：识别出的意图引用的系统交给网关路由（`prefer`）；可单独发起的意图作为工作台“常用任务”（`/api/config` 的 `presets`）；`GET /api/intents?text=` 只识别不执行，返回命中项、槽位和给模型的提示，供接入方调试。
+- **路由与工作台**：识别出的意图引用的系统交给网关路由（`prefer`）；可单独发起的意图作为工作台“常用任务”（`/api/config` 的 `presets`）；`GET /api/intents?text=` 只识别不执行，返回命中项、槽位和给模型的提示，供接入方调试。工作台在每次回复顶部显示“识别为：场景名 · 所属系统”（来自 `run_started.intent`）。
+- **识别记录**（`intent_log.py`）：每次运行把提问（前 500 字）和识别结果追加到 `data/intents.jsonl`（与审计一样按大小轮转、不删除）。`GET /api/intents/log?limit=&matched=` 汇总最近 1000 次运行：命中率、各场景命中次数、没识别到的提问（相同的合并计数，按次数排序），用来决定给哪个场景补触发词、新写哪个场景。
 
 配置 `LLM_BASE_URL` 与 `LLM_MODEL` 后自动切换为真实模型。模型调用（`llm.py`）遇到限流、服务端错误或连接失败时按 `LLM_MAX_RETRIES` 退避重试，但已经把文字推给工作台之后不重试（重发会让文字重复），直接报错；接口返回 token 用量时累计到 `run_finished.usage`。发给模型的历史按用户消息为界从最早的一轮丢起，同时受条数（60）和估算的 token 预算（`AGENT_HISTORY_TOKENS`）限制。
 
@@ -205,7 +207,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | `AGENT_HOST` / `AGENT_PORT` | 127.0.0.1 / 8000 | Agent 服务监听地址 |
 | `AGENT_PUBLIC_URL` | http://localhost:8000 | 浏览器访问 Agent 的地址：下发给内嵌系统页面连接桥接中心、读取结果，并作为允许的浏览器来源（CORS 与来源校验）。用别的地址访问工作台时必须改它 |
 | `AGENT_ALLOWED_ORIGINS` | 空 | 额外允许的浏览器来源，逗号分隔（如前端开发时的 `http://localhost:5173`、反向代理域名）。默认已允许 `AGENT_PUBLIC_URL` 和各系统清单里的地址 |
-| `AGENT_DATA_DIR` | ./data | 对话、结果、审计、反馈的存放目录 |
+| `AGENT_DATA_DIR` | ./data | 对话、结果、审计、识别记录、反馈的存放目录 |
 | `AGENT_WEB_DIR` | ./web/dist | 工作台构建产物目录 |
 | `AGENT_MANIFESTS` | systems/*/manifest.yaml | 接入清单位置 |
 | `AGENT_MAX_STEPS` | 12 | 单次运行最多调用模型的轮数 |
@@ -215,7 +217,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 | `AGENT_HTTP_TIMEOUT_S` | 30 | 调用业务系统接口的 HTTP 超时 |
 | `AGENT_FULL_CATALOG_LIMIT` | 30 | 工具数超过该值时按关键词路由 |
 | `AGENT_RESULT_TTL_S` | 86400 | 结果保存时长；过期后从内存和磁盘清理 |
-| `AGENT_AUDIT_ROTATE_MB` | 50 | 审计文件 `audit.jsonl` 超过这个大小时改名为 `audit-<时间>.jsonl` 留存、另起新文件；0 为不轮转。平台不删除审计文件，保留多久由运维决定 |
+| `AGENT_AUDIT_ROTATE_MB` | 50 | 审计文件 `audit.jsonl`（识别记录 `intents.jsonl` 同样）超过这个大小时改名为 `audit-<时间>.jsonl` 留存、另起新文件；0 为不轮转。平台不删除审计文件，保留多久由运维决定 |
 | `AGENT_DEFAULT_USER` | local | 未接 SSO 时所有请求归属的用户：对话、结果、审计、`X-Agent-User` 请求头都用它 |
 | `AGENT_TZ` | Asia/Shanghai | IANA 时区名：系统提示词里的当前时间、规则模式解析“今天”“明天”都按它计算 |
 | `FLEET_URL` / `TMS_URL` / `DISPATCH_URL` | localhost:8101/8102/8103 | 模拟系统地址（清单中引用） |
@@ -236,7 +238,7 @@ Agent 服务（agent/，FastAPI，端口 8000）
 
 ## 7. 扩展点
 
-- 新增场景：在系统目录写 `playbooks.yaml` 并在清单里引用，规则模式、模型提示、路由、常用任务自动生效，不改 Python；用 `/api/intents?text=` 调试。
+- 新增场景：在系统目录写 `playbooks.yaml` 并在清单里引用，规则模式、模型提示、路由、常用任务自动生效，不改 Python；用 `/api/intents?text=` 调试，用 `/api/intents/log` 看哪些提问没被识别。
 - 新增槽位类型：在 `agent/slots.py` 用 `@extractor("类型名", {参数…})` 注册。
 - 运行时扩展：提示词改 `prompt.py`；工具调度策略（并行分批）改 `executor.py`；规划前的识别与路由改 `runtime._plan_turn`。
 - 新增能力来源：在 `agent/providers/` 下实现 `specs()` 与 `call()`，在网关 `_dispatch` 中按 `kind` 分发。

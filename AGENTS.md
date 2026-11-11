@@ -17,7 +17,7 @@ agent/ Agent 服务 (FastAPI :8000)
    intents.py 场景剧本模型·意图识别·R11 校验   slots.py 槽位类型   playbook.py 剧本执行器（规则模式）·给模型的提示
    transcript.py 消息历史解析       gateway.py 目录·校验·风险·confirm_token·重复失败拦截·审计
    providers/ openapi（API）· bridge（界面）· builtin（分组/画布/结果）   conversations.py 对话 JSON 与事件重放
-   results.py 结果仓库(result_id)   audit.py 审计   llm.py / rule_planner.py 模型 / 规则模式（只调剧本，不写场景）
+   results.py 结果仓库(result_id)   audit.py 审计   intent_log.py 识别记录   llm.py / rule_planner.py 模型 / 规则模式（只调剧本，不写场景）
    manifest.py 清单模型与规则校验   check.py 接入检查命令   analytics.py 带人数上限的空间分组
    evaluate.py 模型对照评测命令（规则模式的工具序列作参考）
 systems/  三个模拟业务系统 fleet:8101 · tms:8102 · dispatch:8103，各带 manifest.yaml + SKILL.md，fleet/dispatch 带 playbooks.yaml；样例数据在 _sample_data.py
@@ -39,7 +39,7 @@ cd web && npm ci && npm run typecheck      # 前端类型检查；npm run build 
 
 - 环境：Python ≥ 3.10；Node.js 20.19 / 22.12 及以上（只有改前端时需要）。
 - Windows 下 `python` 可能是 Store 占位符，用 `py -m pytest -q`、`py -m ruff check .`。
-- 未配置 `LLM_*` 即为规则模式（`rule_planner.py` 按各系统 `playbooks.yaml` 执行，走同一条链路）。`GET /api/intents?text=…` 只识别不执行，调试剧本用。
+- 未配置 `LLM_*` 即为规则模式（`rule_planner.py` 按各系统 `playbooks.yaml` 执行，走同一条链路）。`GET /api/intents?text=…` 只识别不执行，调试剧本用；`GET /api/intents/log` 看最近运行里没识别到的提问。
 
 ## 不能破坏的约束
 

@@ -1,7 +1,7 @@
 import { CheckOutlined, CopyOutlined, DislikeFilled, DislikeOutlined, LikeFilled, LikeOutlined, RedoOutlined } from '@ant-design/icons';
 import { Think } from '@ant-design/x';
 import { Alert, App as AntApp, Button, Tooltip } from 'antd';
-import { memo, useState } from 'react';
+import { memo, useState, type CSSProperties } from 'react';
 import { copyText } from '../clipboard';
 import { useWorkbench } from '../context';
 import { formatDuration, formatTokens } from '../format';
@@ -17,7 +17,8 @@ const STATUS_NOTE: Partial<Record<Run['status'], string>> = {
 
 /** 一次运行在对话里的呈现：思考过程、执行过程、确认卡片、答复、操作。 */
 export const RunMessage = memo(function RunMessage({ run, isLast }: { run: Run; isLast: boolean }) {
-  const { regenerate, feedback, setFeedback, running } = useWorkbench();
+  const { regenerate, feedback, setFeedback, running, systemsMeta } = useWorkbench();
+  const intentSystem = run.intent ? systemsMeta[run.intent.system] : undefined;
   const toolSteps = run.steps.filter((s): s is ToolStep => s.kind === 'tool');
   const reasoning = [run.reasoning, run.liveReasoning].filter(Boolean).join('\n\n');
   const thinking = run.status === 'running' && Boolean(run.liveReasoning) && !run.liveText;
@@ -32,6 +33,17 @@ export const RunMessage = memo(function RunMessage({ run, isLast }: { run: Run; 
 
   return (
     <div className="bt-run">
+      {run.intent && (
+        <div className="bt-intent" title="按场景剧本识别出的任务；模型模式下只是给模型的参考">
+          识别为<b>{run.intent.title}</b>
+          {intentSystem && (
+            <span className="bt-sys" style={{ '--c': intentSystem.color } as CSSProperties}>
+              {intentSystem.title}
+            </span>
+          )}
+        </div>
+      )}
+
       {reasoning && (
         <Think title={thinking ? '正在思考' : '思考过程'} loading={thinking} blink={thinking} defaultExpanded={false}>
           <div className="bt-reasoning">{reasoning}</div>

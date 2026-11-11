@@ -32,6 +32,7 @@ from .conversations import (
 )
 from .executor import ToolExecutor
 from .gateway import Gateway, PendingConfirm
+from .intent_log import IntentLog
 from .intents import IntentLibrary, IntentMatch
 from .llm import LLM, LLMError
 from .playbook import describe
@@ -93,6 +94,7 @@ class AgentRuntime:
         conversations: ConversationStore,
         send: Send,
         intents: IntentLibrary | None = None,
+        intent_log: IntentLog | None = None,
     ):
         self.s = settings
         self.gw = gateway
@@ -101,6 +103,7 @@ class AgentRuntime:
         self.conversations = conversations
         self.send = send
         self.intents = intents if intents is not None else IntentLibrary(gateway.manifests.values())
+        self.intent_log = intent_log  # 每次运行的识别结果落盘，供补剧本参考；不给时不记
         self.prompts = PromptBuilder(settings, gateway, store)
         self.executor = ToolExecutor(gateway)
         self.sessions: dict[str, Session] = {}
@@ -205,6 +208,10 @@ class AgentRuntime:
         try:
             conv.history.append({"role": "user", "content": text})
             turn = self._plan_turn(conv, text)
+            if self.intent_log is not None:
+                self.intent_log.record(
+                    user=conv.user, conversation_id=conv.id, run_id=run_id, planner=self.llm.label, text=text, intent=turn.intent
+                )
             await emit(
                 {"type": "run_started", "text": text, "planner": self.llm.label, "intent": turn.intent, "started_at": time.time()}
             )

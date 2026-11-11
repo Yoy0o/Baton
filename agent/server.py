@@ -35,6 +35,7 @@ from .config import ROOT, Settings
 from .contracts import ToolError, for_model
 from .conversations import ConversationStore, make_title
 from .gateway import Gateway
+from .intent_log import IntentLog
 from .intents import IntentLibrary
 from .llm import make_llm
 from .manifest import load_manifests
@@ -57,7 +58,9 @@ class Platform:
         self.manifests = load_manifests(settings.manifests_glob)
         self.http = httpx.AsyncClient(transport=transport, timeout=settings.http_timeout_s)
         self.store = ResultStore(settings.data_dir, settings.result_ttl_s)
-        self.audit = AuditLog(settings.data_dir, rotate_bytes=int(settings.audit_rotate_mb * 1024 * 1024), tz=settings.tzinfo)
+        rotate = int(settings.audit_rotate_mb * 1024 * 1024)
+        self.audit = AuditLog(settings.data_dir, rotate_bytes=rotate, tz=settings.tzinfo)
+        self.intent_log = IntentLog(settings.data_dir, rotate_bytes=rotate, tz=settings.tzinfo)
         self.conversations = ConversationStore(settings.data_dir)
         self.clients: dict[str, WebSocket] = {}
         self._send_locks: dict[str, asyncio.Lock] = {}
@@ -66,7 +69,8 @@ class Platform:
         self.intents = IntentLibrary(self.manifests)  # 场景剧本：意图识别、规则模式执行、路由参考（ADR-0011）
         self.llm = make_llm(settings, self.http, self.intents)
         self.runtime = AgentRuntime(
-            settings, self.gateway, self.store, self.llm, self.conversations, self.send, intents=self.intents
+            settings, self.gateway, self.store, self.llm, self.conversations, self.send,
+            intents=self.intents, intent_log=self.intent_log,
         )
 
     async def send(self, client_id: str, event: dict[str, Any]) -> None:
@@ -249,6 +253,11 @@ def create_app(settings: Settings | None = None, transport: httpx.AsyncBaseTrans
             out["matches"] = [{**m.brief(), "hits": m.hits, "slots": m.slots} for m in matches]
             out["hint"] = describe(lib, matches, tools)
         return out
+
+    @app.get("/api/intents/log")
+    async def intents_log(limit: int = Query(100, ge=1, le=1000), matched: bool | None = Query(None)) -> dict[str, Any]:
+        """最近运行的识别情况：命中率、各场景命中次数、没识别到的提问（补剧本的依据）。matched 过滤 entries。"""
+        return platform.intent_log.report(user, limit=limit, matched=matched)
 
     @app.get("/api/tools")
     async def tools(client: str = Query("", max_length=64), session: str = Query("", max_length=64)) -> dict[str, Any]:
